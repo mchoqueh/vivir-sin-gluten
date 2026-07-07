@@ -8,6 +8,18 @@ type SearchParams = {
   type?: string | string[];
 };
 
+type ChangeListItem = {
+  id: string;
+  type: "ADDED" | "REMOVED" | "MODIFIED";
+  sourceType: "FOOD" | "MEDICINE";
+  createdAt: Date;
+  title: string;
+  description: string | null;
+  item: {
+    id: string;
+  } | null;
+};
+
 function firstParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -24,11 +36,23 @@ export default async function CambiosPage({
       ? type
       : undefined;
 
-  const changes = await prisma.itemChange.findMany({
+  const changes: ChangeListItem[] = await prisma.itemChange.findMany({
     where: changeType ? { type: changeType } : {},
     orderBy: { createdAt: "desc" },
     take: 100,
-    include: { item: true },
+    select: {
+      id: true,
+      type: true,
+      sourceType: true,
+      createdAt: true,
+      title: true,
+      description: true,
+      item: {
+        select: {
+          id: true,
+        },
+      },
+    },
   });
 
   return (
