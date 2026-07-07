@@ -23,7 +23,7 @@ type ScannerState =
   | "SEARCHING"
   | "PROBABLE_MATCH"
   | "FOUND"
-  | "NO_RESULTS"
+  | "NO_MATCH"
   | "ERROR";
 
 type ScannerResultsProps = {
@@ -72,11 +72,15 @@ export function ScannerResults({
           <h2 className="text-lg font-semibold">
             {scannerState === "FOUND"
               ? "Producto encontrado"
+              : scannerState === "NO_MATCH"
+                ? "No encontramos coincidencias"
               : "Coincidencias probables"}
           </h2>
           <p className="text-sm text-zinc-600">
             {scannerState === "FOUND"
               ? "Resultado bloqueado con alta confianza"
+              : scannerState === "NO_MATCH"
+                ? "La sesion de escaneo finalizo"
               : results.length > 0
                 ? `${results.length} resultado${results.length === 1 ? "" : "s"}`
                 : "Sin coincidencias todavia"}
@@ -90,9 +94,36 @@ export function ScannerResults({
         </Link>
       </div>
 
-      {lockedResult ? (
+      {scannerState === "NO_MATCH" ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-950">
+            No encontramos coincidencias.
+          </p>
+          <p className="mt-2 text-sm text-amber-900">Puedes intentar:</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">
+            <li>acercar el envase</li>
+            <li>mejorar la iluminacion</li>
+            <li>enfocar el nombre principal</li>
+          </ul>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={onSearchAgain}
+              className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white"
+            >
+              Intentar nuevamente
+            </button>
+            <Link
+              href={manualSearchHref(detectedText, productType)}
+              className="rounded-md border border-amber-300 bg-white px-3 py-2 text-center text-sm font-semibold text-amber-950"
+            >
+              Buscar manualmente
+            </Link>
+          </div>
+        </div>
+      ) : lockedResult ? (
         <div className="mt-4 rounded-md border border-emerald-300 bg-emerald-50 p-3">
-          <p className="text-xs font-medium uppercase text-emerald-800">
+          <p className="text-sm font-semibold text-emerald-950">
             Producto encontrado
           </p>
           {lockedText ? (
@@ -107,7 +138,7 @@ export function ScannerResults({
               onClick={onContinueScanning}
               className="rounded-md border border-emerald-300 bg-white px-3 py-2 text-sm font-semibold text-emerald-800"
             >
-              Seguir escaneando
+              Escanear otro producto
             </button>
             <button
               type="button"
@@ -137,7 +168,7 @@ export function ScannerResults({
         {listResults.map((result) => (
           <ResultCard key={result.id} result={result} />
         ))}
-        {results.length === 0 && !lockedResult ? (
+        {results.length === 0 && !lockedResult && scannerState !== "NO_MATCH" ? (
           <p className="rounded-md border border-dashed border-zinc-300 p-4 text-sm text-zinc-600">
             Apunta al frente del producto o usa la busqueda manual con el texto
             detectado.

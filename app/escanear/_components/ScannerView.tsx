@@ -9,7 +9,9 @@ import {
   tokenizeProductSearchText,
 } from "@/lib/scan/normalize";
 import {
-  HIGH_CONFIDENCE_SCORE,
+  EXTENDED_SCAN_DURATION_MS,
+  GLOBAL_CONFIDENCE_LOCK,
+  MAX_SCAN_DURATION_MS,
   MIN_STABLE_READS,
   OCR_BUFFER_SIZE,
   OCR_INTERVAL_MS,
@@ -17,6 +19,13 @@ import {
   SEARCH_DEBOUNCE_MS,
   SOFT_LOCK_SCORE,
 } from "@/lib/scan/config";
+import {
+  calculateCandidatePersistence,
+  calculateGlobalConfidence,
+  calculateHeroStability,
+  smoothGlobalConfidence,
+  type CandidateReading,
+} from "@/lib/scan/confidence";
 import {
   buildOcrReading,
   countSimilarReadings,
@@ -30,7 +39,7 @@ import { useCameraScanner } from "../_hooks/useCameraScanner";
 import { useOcrScanner } from "../_hooks/useOcrScanner";
 import type { VisualOcrResult } from "@/lib/scan/visual";
 
-type SearchState = "idle" | "searching" | "done" | "no_results" | "error";
+type SearchState = "idle" | "searching" | "done" | "no_match" | "error";
 type ScannerState =
   | "IDLE"
   | "SCANNING"
@@ -39,7 +48,7 @@ type ScannerState =
   | "SEARCHING"
   | "PROBABLE_MATCH"
   | "FOUND"
-  | "NO_RESULTS"
+  | "NO_MATCH"
   | "ERROR";
 
 type HeroReading = {
@@ -84,8 +93,8 @@ function scannerStateLabel(state: ScannerState) {
       return "Confirmando lectura...";
     case "DETECTING_TEXT":
       return "Detectando texto util...";
-    case "NO_RESULTS":
-      return "Sin coincidencias claras";
+    case "NO_MATCH":
+      return "No encontramos coincidencias";
     case "ERROR":
       return "Hay un problema con el escaner";
     case "SCANNING":
@@ -149,6 +158,15 @@ export function ScannerView() {
   const [lockedText, setLockedText] = useState("");
   const [searchState, setSearchState] = useState<SearchState>("idle");
   const [searchError, setSearchError] = useState<string | null>(null);
+  const [remainingMs, setRemainingMs] = useState(MAX_SCAN_DURATION_MS);
+  const [isExtendingSession, setIsExtendingSession] = useState(false);
+  const [confidenceMetrics, setConfidenceMetrics] = useState({
+    searchScore: 0,
+    heroStability: 0,
+    qualityScore: 0,
+    candidatePersistence: 0,
+    globalConfidence: 0,
+  });
   const startingCameraRef = useRef(false);
   const ocrBufferRef = useRef<OcrReading[]>([]);
   const heroBufferRef = useRef<HeroReading[]>([]);
@@ -158,17 +176,75 @@ export function ScannerView() {
   const lastResultsTextRef = useRef("");
   const stableDominantTokensRef = useRef<string[]>([]);
   const stableSecondaryTokensRef = useRef<string[]>([]);
+  const candidateBufferRef = useRef<CandidateReading[]>([]);
+  const globalConfidenceRef = useRef(0);
   const requestIdRef = useRef(0);
+  const sessionDeadlineRef = useRef(0);
+  const sessionExtendedRef = useRef(false);
+  const scanExpiredRef = useRef(false);
+  const pendingSearchRef = useRef(false);
   const searchCacheRef = useRef(new Map<string, ScannerResult[]>());
-  const scanningEnabled = isCameraReady && !paused;
+  const scanningEnabled =
+    isCameraReady &&
+    !paused &&
+    !lockedResult &&
+    searchState !== "no_match";
   const showStartOverlay =
     cameraStatus === "idle" ||
     cameraStatus === "closed" ||
     cameraStatus === "error";
 
+  const hasStrongEvidence = useCallback(() => {
+    const currentBest = results[0];
+    const latestQuality = bestReadingRef.current?.qualityScore ?? 0;
+    const previousQuality =
+      ocrBufferRef.current.at(-2)?.qualityScore ?? latestQuality;
+
+    return Boolean(
+      stableHeroTextRef.current ||
+        (currentBest && currentBest.score >= SOFT_LOCK_SCORE) ||
+        countSimilarReadings(
+          ocrBufferRef.current,
+          bestReadingRef.current ?? {
+            rawText: "",
+            normalizedText: "",
+            usefulTokens: [],
+            heroText: "",
+            secondaryText: "",
+            dominantTokens: [],
+            secondaryTokens: [],
+            timestamp: Date.now(),
+            qualityScore: 0,
+          },
+        ) >= MIN_STABLE_READS ||
+        latestQuality > previousQuality + 8,
+    );
+  }, [results]);
+
+  const finalizeNoMatch = useCallback(() => {
+    if (lockedResult) return;
+
+    scanExpiredRef.current = true;
+    setPaused(true);
+    setSearchState("no_match");
+  }, [lockedResult]);
+
+  const startSession = useCallback(() => {
+    const now = Date.now();
+    sessionDeadlineRef.current = now + MAX_SCAN_DURATION_MS;
+    sessionExtendedRef.current = false;
+    scanExpiredRef.current = false;
+    pendingSearchRef.current = false;
+    requestIdRef.current += 1;
+    setRemainingMs(MAX_SCAN_DURATION_MS);
+    setIsExtendingSession(false);
+    setSearchState("idle");
+  }, []);
+
   const handleDetectedText = useCallback(
     (ocrResult: VisualOcrResult) => {
       if (lockedResult) return;
+      if (scanExpiredRef.current || searchState === "no_match") return;
       const heroReading = buildHeroReading(ocrResult.heroText);
       let nextStableHeroText = stableHeroTextRef.current;
 
@@ -264,7 +340,7 @@ export function ScannerView() {
       stableSecondaryTokensRef.current = reading.secondaryTokens;
       setBestStableText(reading.rawText);
     },
-    [lockedResult],
+    [lockedResult, searchState],
   );
 
   const { status: ocrStatus, error: ocrError } = useOcrScanner({
@@ -286,9 +362,9 @@ export function ScannerView() {
   const scannerState: ScannerState = useMemo(() => {
     if (cameraError || ocrError || searchState === "error") return "ERROR";
     if (lockedResult) return "FOUND";
+    if (searchState === "no_match") return "NO_MATCH";
     if (searchState === "searching") return "SEARCHING";
     if (results.length > 0) return "PROBABLE_MATCH";
-    if (searchState === "no_results") return "NO_RESULTS";
     if (detectedText && !hasUsefulDetectedText) return "DETECTING_TEXT";
     if (bestStableText) return "CONFIRMING";
     if (scanningEnabled) return "SCANNING";
@@ -309,27 +385,81 @@ export function ScannerView() {
     (nextResults: ScannerResult[], stableText: string, requestId: number) => {
       if (requestId !== requestIdRef.current) return;
       if (lockedResult) return;
+      if (searchState === "no_match") return;
+      pendingSearchRef.current = false;
 
       const nextBest = nextResults[0];
       const currentBest = results[0];
 
       if (!nextBest) {
+        if (scanExpiredRef.current) {
+          finalizeNoMatch();
+          return;
+        }
+
         if (currentBest && currentBest.score >= SOFT_LOCK_SCORE) {
           setSearchState("done");
           return;
         }
 
-        setSearchState("no_results");
+        setSearchState("no_match");
         return;
       }
 
-      if (nextBest.score >= HIGH_CONFIDENCE_SCORE) {
+      const nextCandidateBuffer = [
+        ...candidateBufferRef.current,
+        {
+          productId: nextBest.id,
+          score: nextBest.score,
+          timestamp: Date.now(),
+        },
+      ].slice(-5);
+      candidateBufferRef.current = nextCandidateBuffer;
+
+      const heroStability = calculateHeroStability(
+        heroBufferRef.current.map((reading) => reading.rawText),
+        stableHeroTextRef.current,
+      );
+      const qualityScore = Math.min(
+        100,
+        Math.max(0, bestReadingRef.current?.qualityScore ?? 0),
+      );
+      const candidatePersistence = calculateCandidatePersistence(
+        nextCandidateBuffer,
+        nextBest.id,
+      );
+      const rawGlobalConfidence = calculateGlobalConfidence({
+        searchScore: nextBest.score,
+        heroStability,
+        qualityScore,
+        candidatePersistence,
+      });
+      const nextGlobalConfidence = smoothGlobalConfidence(
+        globalConfidenceRef.current,
+        rawGlobalConfidence,
+      );
+      globalConfidenceRef.current = nextGlobalConfidence;
+      setConfidenceMetrics({
+        searchScore: nextBest.score,
+        heroStability,
+        qualityScore,
+        candidatePersistence,
+        globalConfidence: nextGlobalConfidence,
+      });
+
+      if (nextGlobalConfidence >= GLOBAL_CONFIDENCE_LOCK) {
         setResults(nextResults);
         setLockedResult(nextBest);
         setLockedText(stableText);
         setPaused(true);
         setSearchState("done");
+        scanExpiredRef.current = true;
         lastResultsTextRef.current = stableText;
+        return;
+      }
+
+      if (scanExpiredRef.current) {
+        finalizeNoMatch();
         return;
       }
 
@@ -348,7 +478,7 @@ export function ScannerView() {
 
       setSearchState("done");
     },
-    [lockedResult, results],
+    [finalizeNoMatch, lockedResult, results, searchState],
   );
 
   useEffect(() => {
@@ -368,7 +498,60 @@ export function ScannerView() {
   }, [startCamera]);
 
   useEffect(() => {
+    if (!isCameraReady) return;
+    if (sessionDeadlineRef.current > 0) return;
+
+    startSession();
+  }, [isCameraReady, startSession]);
+
+  useEffect(() => {
+    if (!isCameraReady || lockedResult || searchState === "no_match") return;
+    if (paused && !isExtendingSession) return;
+
+    const intervalId = window.setInterval(() => {
+      const now = Date.now();
+      const deadline = sessionDeadlineRef.current;
+      if (!deadline) return;
+
+      const nextRemainingMs = Math.max(0, deadline - now);
+      setRemainingMs(nextRemainingMs);
+
+      if (nextRemainingMs > 0) return;
+
+      if (!sessionExtendedRef.current && hasStrongEvidence()) {
+        sessionExtendedRef.current = true;
+        sessionDeadlineRef.current = now + EXTENDED_SCAN_DURATION_MS;
+        setRemainingMs(EXTENDED_SCAN_DURATION_MS);
+        setIsExtendingSession(true);
+        setSearchState((current) =>
+          current === "searching" ? current : "done",
+        );
+        return;
+      }
+
+      scanExpiredRef.current = true;
+      setPaused(true);
+
+      if (!pendingSearchRef.current) {
+        finalizeNoMatch();
+      }
+    }, 250);
+
+    return () => window.clearInterval(intervalId);
+  }, [
+    finalizeNoMatch,
+    hasStrongEvidence,
+    isCameraReady,
+    isExtendingSession,
+    lockedResult,
+    paused,
+    searchState,
+  ]);
+
+  useEffect(() => {
     if (lockedResult) return;
+    if (searchState === "no_match") return;
+    if (scanExpiredRef.current) return;
 
     const searchText = stableHeroText
       ? `${stableHeroText} ${bestStableText}`
@@ -386,12 +569,18 @@ export function ScannerView() {
     requestIdRef.current = requestId;
 
     const timeoutId = window.setTimeout(async () => {
+      if (scanExpiredRef.current) {
+        if (!pendingSearchRef.current) finalizeNoMatch();
+        return;
+      }
+
       const cachedResults = searchCacheRef.current.get(cacheKey);
       if (cachedResults) {
         applySearchResults(cachedResults, searchText, requestId);
         return;
       }
 
+      pendingSearchRef.current = true;
       setSearchState("searching");
       setSearchError(null);
 
@@ -420,8 +609,13 @@ export function ScannerView() {
         searchCacheRef.current.set(cacheKey, nextResults);
         applySearchResults(nextResults, searchText, requestId);
       } catch (error) {
+        pendingSearchRef.current = false;
         if (controller.signal.aborted) return;
         if (requestId !== requestIdRef.current) return;
+        if (scanExpiredRef.current) {
+          finalizeNoMatch();
+          return;
+        }
 
         setSearchState("error");
         setSearchError(
@@ -436,7 +630,15 @@ export function ScannerView() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [applySearchResults, bestStableText, lockedResult, productType, stableHeroText]);
+  }, [
+    applySearchResults,
+    bestStableText,
+    finalizeNoMatch,
+    lockedResult,
+    productType,
+    searchState,
+    stableHeroText,
+  ]);
 
   async function openCameraFromUserAction() {
     scannerUiLog("openCameraFromUserAction:called", {
@@ -479,15 +681,24 @@ export function ScannerView() {
     heroBufferRef.current = [];
     stableDominantTokensRef.current = [];
     stableSecondaryTokensRef.current = [];
+    candidateBufferRef.current = [];
+    globalConfidenceRef.current = 0;
     bestReadingRef.current = null;
     ocrBufferRef.current = [];
+    searchCacheRef.current.clear();
+    setConfidenceMetrics({
+      searchScore: 0,
+      heroStability: 0,
+      qualityScore: 0,
+      candidatePersistence: 0,
+      globalConfidence: 0,
+    });
+    startSession();
     if (!isCameraReady) void openCameraFromUserAction();
   }
 
   function continueScanning() {
-    setPaused(false);
-    setLockedResult(null);
-    setLockedText("");
+    retry();
   }
 
   function closeCamera() {
@@ -495,6 +706,15 @@ export function ScannerView() {
     setPaused(true);
     stopCamera();
   }
+
+  const remainingSeconds = Math.ceil(remainingMs / 1000);
+  const progressTotalMs = isExtendingSession
+    ? EXTENDED_SCAN_DURATION_MS
+    : MAX_SCAN_DURATION_MS;
+  const progressPercent = Math.max(
+    0,
+    Math.min(100, 100 - (remainingMs / progressTotalMs) * 100),
+  );
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-3xl flex-col bg-stone-50">
@@ -580,6 +800,24 @@ export function ScannerView() {
           </div>
 
           <div className="absolute inset-x-3 bottom-3 rounded-xl bg-black/70 p-3 text-white">
+            {!lockedResult && searchState !== "no_match" ? (
+              <div className="mb-3">
+                <div className="flex items-center justify-between text-xs text-white/70">
+                  <span>
+                    {isExtendingSession
+                      ? "Verificando coincidencia..."
+                      : "Buscando producto..."}
+                  </span>
+                  <span>{remainingSeconds} s restantes</span>
+                </div>
+                <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/20">
+                  <div
+                    className="h-full rounded-full bg-emerald-400 transition-all"
+                    style={{ width: `${progressPercent}%` }}
+                  />
+                </div>
+              </div>
+            ) : null}
             <p className="text-xs uppercase text-white/60">Texto detectado</p>
             <p className="mt-1 line-clamp-3 text-sm">
               {bestStableText || detectedText || "Aun no hay texto suficiente."}
@@ -629,6 +867,28 @@ export function ScannerView() {
                 {secondaryText}
               </p>
             ) : null}
+            <div className="mt-2 border-t border-zinc-200 pt-2">
+              <p>
+                <span className="font-semibold">Search Score:</span>{" "}
+                {confidenceMetrics.searchScore}
+              </p>
+              <p>
+                <span className="font-semibold">Hero Stability:</span>{" "}
+                {confidenceMetrics.heroStability}
+              </p>
+              <p>
+                <span className="font-semibold">OCR Quality:</span>{" "}
+                {confidenceMetrics.qualityScore}
+              </p>
+              <p>
+                <span className="font-semibold">Candidate Persistence:</span>{" "}
+                {confidenceMetrics.candidatePersistence}
+              </p>
+              <p>
+                <span className="font-semibold">Global Confidence:</span>{" "}
+                {confidenceMetrics.globalConfidence}
+              </p>
+            </div>
           </div>
         ) : null}
 
