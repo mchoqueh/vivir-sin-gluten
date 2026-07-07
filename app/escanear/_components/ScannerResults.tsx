@@ -65,6 +65,12 @@ export function ScannerResults({
     ? results.filter((result) => result.id !== best.id)
     : results;
 
+  if (process.env.NODE_ENV === "development" && lockedResult) {
+    console.log("[scanner] render using lockedResult", {
+      productId: lockedResult.id,
+    });
+  }
+
   return (
     <section className="rounded-t-2xl border border-zinc-200 bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between gap-3">
@@ -94,34 +100,7 @@ export function ScannerResults({
         </Link>
       </div>
 
-      {scannerState === "NO_MATCH" ? (
-        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4">
-          <p className="text-sm font-semibold text-amber-950">
-            No encontramos coincidencias.
-          </p>
-          <p className="mt-2 text-sm text-amber-900">Puedes intentar:</p>
-          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">
-            <li>acercar el envase</li>
-            <li>mejorar la iluminacion</li>
-            <li>enfocar el nombre principal</li>
-          </ul>
-          <div className="mt-4 grid gap-2 sm:grid-cols-2">
-            <button
-              type="button"
-              onClick={onSearchAgain}
-              className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white"
-            >
-              Intentar nuevamente
-            </button>
-            <Link
-              href={manualSearchHref(detectedText, productType)}
-              className="rounded-md border border-amber-300 bg-white px-3 py-2 text-center text-sm font-semibold text-amber-950"
-            >
-              Buscar manualmente
-            </Link>
-          </div>
-        </div>
-      ) : lockedResult ? (
+      {lockedResult ? (
         <div className="mt-4 rounded-md border border-emerald-300 bg-emerald-50 p-3">
           <p className="text-sm font-semibold text-emerald-950">
             Producto encontrado
@@ -152,6 +131,33 @@ export function ScannerResults({
               className="rounded-md bg-emerald-700 px-3 py-2 text-center text-sm font-semibold text-white"
             >
               Ver detalle
+            </Link>
+          </div>
+        </div>
+      ) : scannerState === "NO_MATCH" ? (
+        <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-4">
+          <p className="text-sm font-semibold text-amber-950">
+            No encontramos coincidencias.
+          </p>
+          <p className="mt-2 text-sm text-amber-900">Puedes intentar:</p>
+          <ul className="mt-2 list-disc space-y-1 pl-5 text-sm text-amber-900">
+            <li>acercar el envase</li>
+            <li>mejorar la iluminacion</li>
+            <li>enfocar el nombre principal</li>
+          </ul>
+          <div className="mt-4 grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={onSearchAgain}
+              className="rounded-md bg-emerald-700 px-3 py-2 text-sm font-semibold text-white"
+            >
+              Intentar nuevamente
+            </button>
+            <Link
+              href={manualSearchHref(detectedText, productType)}
+              className="rounded-md border border-amber-300 bg-white px-3 py-2 text-center text-sm font-semibold text-amber-950"
+            >
+              Buscar manualmente
             </Link>
           </div>
         </div>

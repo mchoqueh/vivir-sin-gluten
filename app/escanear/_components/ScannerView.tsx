@@ -178,7 +178,12 @@ export function ScannerView() {
   const stableSecondaryTokensRef = useRef<string[]>([]);
   const candidateBufferRef = useRef<CandidateReading[]>([]);
   const globalConfidenceRef = useRef(0);
+  const scannerStateRef = useRef<ScannerState>("IDLE");
+  const lockedResultRef = useRef<ScannerResult | null>(null);
+  const activeSessionIdRef = useRef(0);
   const requestIdRef = useRef(0);
+  const debounceTimerRef = useRef<number | null>(null);
+  const activeAbortControllerRef = useRef<AbortController | null>(null);
   const sessionDeadlineRef = useRef(0);
   const sessionExtendedRef = useRef(false);
   const scanExpiredRef = useRef(false);
@@ -222,20 +227,34 @@ export function ScannerView() {
   }, [results]);
 
   const finalizeNoMatch = useCallback(() => {
-    if (lockedResult) return;
+    if (
+      scannerStateRef.current === "FOUND" ||
+      lockedResultRef.current ||
+      globalConfidenceRef.current >= GLOBAL_CONFIDENCE_LOCK
+    ) {
+      scannerUiLog("timeout ignored because FOUND", {
+        scannerState: scannerStateRef.current,
+        hasLockedResult: Boolean(lockedResultRef.current),
+        globalConfidence: globalConfidenceRef.current,
+      });
+      return;
+    }
 
     scanExpiredRef.current = true;
+    scannerStateRef.current = "NO_MATCH";
     setPaused(true);
     setSearchState("no_match");
-  }, [lockedResult]);
+  }, []);
 
   const startSession = useCallback(() => {
     const now = Date.now();
+    activeSessionIdRef.current += 1;
     sessionDeadlineRef.current = now + MAX_SCAN_DURATION_MS;
     sessionExtendedRef.current = false;
     scanExpiredRef.current = false;
     pendingSearchRef.current = false;
     requestIdRef.current += 1;
+    scannerStateRef.current = "SCANNING";
     setRemainingMs(MAX_SCAN_DURATION_MS);
     setIsExtendingSession(false);
     setSearchState("idle");
@@ -243,7 +262,10 @@ export function ScannerView() {
 
   const handleDetectedText = useCallback(
     (ocrResult: VisualOcrResult) => {
-      if (lockedResult) return;
+      if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
+        scannerUiLog("ignored update because FOUND", { source: "ocr" });
+        return;
+      }
       if (scanExpiredRef.current || searchState === "no_match") return;
       const heroReading = buildHeroReading(ocrResult.heroText);
       let nextStableHeroText = stableHeroTextRef.current;
@@ -340,7 +362,7 @@ export function ScannerView() {
       stableSecondaryTokensRef.current = reading.secondaryTokens;
       setBestStableText(reading.rawText);
     },
-    [lockedResult, searchState],
+    [searchState],
   );
 
   const { status: ocrStatus, error: ocrError } = useOcrScanner({
@@ -381,10 +403,107 @@ export function ScannerView() {
     searchState,
   ]);
 
+  useEffect(() => {
+    scannerStateRef.current = scannerState;
+    lockedResultRef.current = lockedResult;
+  }, [lockedResult, scannerState]);
+
+  const lockFoundResult = useCallback(
+    ({
+      nextResults,
+      result,
+      stableText,
+      requestId,
+      sessionId,
+    }: {
+      nextResults: ScannerResult[];
+      result: ScannerResult;
+      stableText: string;
+      requestId: number;
+      sessionId: number;
+    }) => {
+      if (sessionId !== activeSessionIdRef.current) {
+        scannerUiLog("ignored stale session", {
+          sessionId,
+          activeSessionId: activeSessionIdRef.current,
+        });
+        return;
+      }
+
+      if (requestId !== requestIdRef.current) {
+        scannerUiLog("ignored stale request", {
+          requestId,
+          activeRequestId: requestIdRef.current,
+        });
+        return;
+      }
+
+      if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
+        scannerUiLog("ignored update because FOUND", {
+          source: "lockFoundResult",
+        });
+        return;
+      }
+
+      scannerUiLog("FOUND locked", {
+        productId: result.id,
+        globalConfidence: globalConfidenceRef.current,
+        requestId,
+        sessionId,
+      });
+
+      if (debounceTimerRef.current) {
+        window.clearTimeout(debounceTimerRef.current);
+        debounceTimerRef.current = null;
+      }
+
+      activeAbortControllerRef.current?.abort();
+      activeAbortControllerRef.current = null;
+      pendingSearchRef.current = false;
+      scanExpiredRef.current = true;
+      scannerStateRef.current = "FOUND";
+      lockedResultRef.current = result;
+      setResults(nextResults);
+      setLockedResult(result);
+      setLockedText(stableText);
+      setPaused(true);
+      setSearchState("done");
+      lastResultsTextRef.current = stableText;
+    },
+    [],
+  );
+
   const applySearchResults = useCallback(
-    (nextResults: ScannerResult[], stableText: string, requestId: number) => {
-      if (requestId !== requestIdRef.current) return;
-      if (lockedResult) return;
+    (
+      nextResults: ScannerResult[],
+      stableText: string,
+      requestId: number,
+      sessionId: number,
+    ) => {
+      if (sessionId !== activeSessionIdRef.current) {
+        scannerUiLog("ignored stale session", {
+          source: "applySearchResults",
+          sessionId,
+          activeSessionId: activeSessionIdRef.current,
+        });
+        return;
+      }
+
+      if (requestId !== requestIdRef.current) {
+        scannerUiLog("ignored stale request", {
+          requestId,
+          activeRequestId: requestIdRef.current,
+        });
+        return;
+      }
+
+      if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
+        scannerUiLog("ignored update because FOUND", {
+          source: "applySearchResults",
+        });
+        return;
+      }
+
       if (searchState === "no_match") return;
       pendingSearchRef.current = false;
 
@@ -448,13 +567,13 @@ export function ScannerView() {
       });
 
       if (nextGlobalConfidence >= GLOBAL_CONFIDENCE_LOCK) {
-        setResults(nextResults);
-        setLockedResult(nextBest);
-        setLockedText(stableText);
-        setPaused(true);
-        setSearchState("done");
-        scanExpiredRef.current = true;
-        lastResultsTextRef.current = stableText;
+        lockFoundResult({
+          nextResults,
+          result: nextBest,
+          stableText,
+          requestId,
+          sessionId,
+        });
         return;
       }
 
@@ -478,7 +597,7 @@ export function ScannerView() {
 
       setSearchState("done");
     },
-    [finalizeNoMatch, lockedResult, results, searchState],
+    [finalizeNoMatch, lockFoundResult, results, searchState],
   );
 
   useEffect(() => {
@@ -507,8 +626,23 @@ export function ScannerView() {
   useEffect(() => {
     if (!isCameraReady || lockedResult || searchState === "no_match") return;
     if (paused && !isExtendingSession) return;
+    const sessionId = activeSessionIdRef.current;
 
     const intervalId = window.setInterval(() => {
+      if (sessionId !== activeSessionIdRef.current) {
+        scannerUiLog("ignored stale session", {
+          source: "timeout",
+          sessionId,
+          activeSessionId: activeSessionIdRef.current,
+        });
+        return;
+      }
+
+      if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
+        scannerUiLog("timeout ignored because FOUND");
+        return;
+      }
+
       const now = Date.now();
       const deadline = sessionDeadlineRef.current;
       if (!deadline) return;
@@ -549,6 +683,10 @@ export function ScannerView() {
   ]);
 
   useEffect(() => {
+    if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
+      scannerUiLog("ignored update because FOUND", { source: "search-effect" });
+      return;
+    }
     if (lockedResult) return;
     if (searchState === "no_match") return;
     if (scanExpiredRef.current) return;
@@ -562,13 +700,31 @@ export function ScannerView() {
     }
 
     const controller = new AbortController();
+    activeAbortControllerRef.current?.abort();
+    activeAbortControllerRef.current = controller;
     const dominantCachePart = stableDominantTokensRef.current.join(",");
     const secondaryCachePart = stableSecondaryTokensRef.current.join(",");
     const cacheKey = `${productType}:${normalized}:${dominantCachePart}:${secondaryCachePart}`;
     const requestId = requestIdRef.current + 1;
+    const sessionId = activeSessionIdRef.current;
     requestIdRef.current = requestId;
 
     const timeoutId = window.setTimeout(async () => {
+      debounceTimerRef.current = null;
+      if (sessionId !== activeSessionIdRef.current) {
+        scannerUiLog("ignored stale session", {
+          source: "debounce",
+          sessionId,
+          activeSessionId: activeSessionIdRef.current,
+        });
+        return;
+      }
+
+      if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
+        scannerUiLog("ignored update because FOUND", { source: "debounce" });
+        return;
+      }
+
       if (scanExpiredRef.current) {
         if (!pendingSearchRef.current) finalizeNoMatch();
         return;
@@ -576,7 +732,7 @@ export function ScannerView() {
 
       const cachedResults = searchCacheRef.current.get(cacheKey);
       if (cachedResults) {
-        applySearchResults(cachedResults, searchText, requestId);
+        applySearchResults(cachedResults, searchText, requestId, sessionId);
         return;
       }
 
@@ -607,11 +763,29 @@ export function ScannerView() {
 
         const nextResults = payload.results ?? [];
         searchCacheRef.current.set(cacheKey, nextResults);
-        applySearchResults(nextResults, searchText, requestId);
+        applySearchResults(nextResults, searchText, requestId, sessionId);
       } catch (error) {
         pendingSearchRef.current = false;
         if (controller.signal.aborted) return;
-        if (requestId !== requestIdRef.current) return;
+        if (sessionId !== activeSessionIdRef.current) {
+          scannerUiLog("ignored stale session", {
+            source: "fetch-catch",
+            sessionId,
+            activeSessionId: activeSessionIdRef.current,
+          });
+          return;
+        }
+        if (requestId !== requestIdRef.current) {
+          scannerUiLog("ignored stale request", {
+            requestId,
+            activeRequestId: requestIdRef.current,
+          });
+          return;
+        }
+        if (lockedResultRef.current) {
+          scannerUiLog("ignored update because FOUND", { source: "fetch-catch" });
+          return;
+        }
         if (scanExpiredRef.current) {
           finalizeNoMatch();
           return;
@@ -625,9 +799,16 @@ export function ScannerView() {
         );
       }
     }, SEARCH_DEBOUNCE_MS);
+    debounceTimerRef.current = timeoutId;
 
     return () => {
       window.clearTimeout(timeoutId);
+      if (debounceTimerRef.current === timeoutId) {
+        debounceTimerRef.current = null;
+      }
+      if (activeAbortControllerRef.current === controller) {
+        activeAbortControllerRef.current = null;
+      }
       controller.abort();
     };
   }, [
@@ -662,11 +843,18 @@ export function ScannerView() {
     }
   }
 
-  function retry() {
-    scannerUiLog("retry:called", { cameraStatus, isCameraReady });
-    setPaused(false);
+  function resetScanSession(reason: string, restart = true) {
+    scannerUiLog("reset by user", { reason, cameraStatus, isCameraReady });
+    if (debounceTimerRef.current) {
+      window.clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+    activeAbortControllerRef.current?.abort();
+    activeAbortControllerRef.current = null;
+    setPaused(!restart);
     setResults([]);
     setLockedResult(null);
+    lockedResultRef.current = null;
     setLockedText("");
     setBestStableText("");
     setHeroText("");
@@ -675,6 +863,7 @@ export function ScannerView() {
     setSecondaryText("");
     setDetectedText("");
     setSearchState("idle");
+    scannerStateRef.current = restart ? "SCANNING" : "IDLE";
     lastAcceptedTextRef.current = "";
     lastResultsTextRef.current = "";
     stableHeroTextRef.current = "";
@@ -685,6 +874,7 @@ export function ScannerView() {
     globalConfidenceRef.current = 0;
     bestReadingRef.current = null;
     ocrBufferRef.current = [];
+    pendingSearchRef.current = false;
     searchCacheRef.current.clear();
     setConfidenceMetrics({
       searchScore: 0,
@@ -693,18 +883,35 @@ export function ScannerView() {
       candidatePersistence: 0,
       globalConfidence: 0,
     });
-    startSession();
-    if (!isCameraReady) void openCameraFromUserAction();
+    if (restart) {
+      startSession();
+      if (!isCameraReady) void openCameraFromUserAction();
+    } else {
+      activeSessionIdRef.current += 1;
+      requestIdRef.current += 1;
+      sessionDeadlineRef.current = 0;
+      sessionExtendedRef.current = false;
+      scanExpiredRef.current = true;
+      setRemainingMs(MAX_SCAN_DURATION_MS);
+      setIsExtendingSession(false);
+    }
   }
 
   function continueScanning() {
-    retry();
+    resetScanSession("continue-scanning");
   }
 
   function closeCamera() {
     scannerUiLog("closeCamera:called");
-    setPaused(true);
+    resetScanSession("close-camera", false);
     stopCamera();
+  }
+
+  function handleProductTypeChange(nextProductType: ScannerProductType) {
+    if (nextProductType === productType) return;
+
+    setProductType(nextProductType);
+    resetScanSession("type-change");
   }
 
   const remainingSeconds = Math.ceil(remainingMs / 1000);
@@ -732,7 +939,10 @@ export function ScannerView() {
       </header>
 
       <div className="px-4">
-        <ProductTypeFilter value={productType} onChange={setProductType} />
+        <ProductTypeFilter
+          value={productType}
+          onChange={handleProductTypeChange}
+        />
       </div>
 
       <section className="mt-4 px-4">
@@ -910,9 +1120,7 @@ export function ScannerView() {
           </button>
           <button
             type="button"
-            onClick={retry}
-            onPointerUp={retry}
-            onTouchEnd={retry}
+            onClick={() => resetScanSession("open-camera-button")}
             className="touch-manipulation rounded-md bg-emerald-700 px-4 py-3 text-sm font-semibold text-white"
           >
             {cameraStatus === "starting" ? "Abriendo..." : "Abrir camara"}
@@ -935,7 +1143,7 @@ export function ScannerView() {
           lockedResult={lockedResult}
           lockedText={lockedText}
           onContinueScanning={continueScanning}
-          onSearchAgain={retry}
+          onSearchAgain={() => resetScanSession("search-again")}
         />
       </div>
     </div>
