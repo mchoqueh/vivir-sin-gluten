@@ -2,7 +2,11 @@
 
 import Link from "next/link";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { normalizeProductSearchText } from "@/lib/scan/normalize";
+import {
+  areSearchTextsSimilar,
+  hasUsefulOcrText,
+  normalizeProductSearchText,
+} from "@/lib/scan/normalize";
 import { ProductTypeFilter, type ScannerProductType } from "./ProductTypeFilter";
 import { ScannerResults, type ScannerResult } from "./ScannerResults";
 import { useCameraScanner } from "../_hooks/useCameraScanner";
@@ -49,6 +53,8 @@ export function ScannerView() {
   const [searchState, setSearchState] = useState<SearchState>("idle");
   const [searchError, setSearchError] = useState<string | null>(null);
   const startingCameraRef = useRef(false);
+  const lastAcceptedTextRef = useRef("");
+  const searchCacheRef = useRef(new Map<string, ScannerResult[]>());
   const scanningEnabled = isCameraReady && !paused;
   const showStartOverlay =
     cameraStatus === "idle" ||
@@ -57,6 +63,19 @@ export function ScannerView() {
 
   const handleDetectedText = useCallback((text: string) => {
     if (normalizeProductSearchText(text).length < 3) return;
+
+    if (!hasUsefulOcrText(text)) {
+      setDetectedText(text);
+      setResults([]);
+      setSearchState("idle");
+      return;
+    }
+
+    if (areSearchTextsSimilar(lastAcceptedTextRef.current, text)) {
+      return;
+    }
+
+    lastAcceptedTextRef.current = text;
     setDetectedText(text);
   }, []);
 
@@ -71,6 +90,7 @@ export function ScannerView() {
     () => manualSearchHref(detectedText, productType),
     [detectedText, productType],
   );
+  const hasUsefulDetectedText = hasUsefulOcrText(detectedText);
 
   useEffect(() => {
     scannerUiLog("mount", {
@@ -90,12 +110,20 @@ export function ScannerView() {
 
   useEffect(() => {
     const normalized = normalizeProductSearchText(detectedText);
-    if (normalized.length < 3) {
+    if (normalized.length < 3 || !hasUsefulOcrText(detectedText)) {
       return;
     }
 
     const controller = new AbortController();
+    const cacheKey = `${productType}:${normalized}`;
     const timeoutId = window.setTimeout(async () => {
+      const cachedResults = searchCacheRef.current.get(cacheKey);
+      if (cachedResults) {
+        setResults(cachedResults);
+        setSearchState("done");
+        return;
+      }
+
       setSearchState("searching");
       setSearchError(null);
 
@@ -115,7 +143,9 @@ export function ScannerView() {
           results?: ScannerResult[];
         };
 
-        setResults(payload.results ?? []);
+        const nextResults = payload.results ?? [];
+        searchCacheRef.current.set(cacheKey, nextResults);
+        setResults(nextResults);
         setSearchState("done");
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -127,7 +157,7 @@ export function ScannerView() {
             : "No se pudo buscar coincidencias.",
         );
       }
-    }, 350);
+    }, 650);
 
     return () => {
       window.clearTimeout(timeoutId);
@@ -260,7 +290,9 @@ export function ScannerView() {
               {detectedText || "Aun no hay texto suficiente."}
             </p>
             <p className="mt-2 text-xs text-white/70">
-              {searchState === "searching"
+              {detectedText && !hasUsefulDetectedText
+                ? "Detectando texto util..."
+                : searchState === "searching"
                 ? "Buscando coincidencias..."
                 : searchState === "error"
                   ? searchError

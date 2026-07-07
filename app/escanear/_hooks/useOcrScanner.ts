@@ -69,10 +69,14 @@ export function useOcrScanner({
       const sourceHeight = video.videoHeight;
       if (!sourceWidth || !sourceHeight) return null;
 
-      const maxWidth = 960;
-      const scale = Math.min(1, maxWidth / sourceWidth);
-      const width = Math.round(sourceWidth * scale);
-      const height = Math.round(sourceHeight * scale);
+      const cropWidth = Math.round(sourceWidth * 0.86);
+      const cropHeight = Math.round(sourceHeight * 0.48);
+      const cropX = Math.round((sourceWidth - cropWidth) / 2);
+      const cropY = Math.round(sourceHeight * 0.24);
+      const maxWidth = 720;
+      const scale = Math.min(1, maxWidth / cropWidth);
+      const width = Math.round(cropWidth * scale);
+      const height = Math.round(cropHeight * scale);
       const canvas = canvasRef.current ?? document.createElement("canvas");
       canvasRef.current = canvas;
       canvas.width = width;
@@ -81,7 +85,39 @@ export function useOcrScanner({
       const context = canvas.getContext("2d", { willReadFrequently: true });
       if (!context) return null;
 
-      context.drawImage(video, 0, 0, width, height);
+      context.drawImage(
+        video,
+        cropX,
+        cropY,
+        cropWidth,
+        cropHeight,
+        0,
+        0,
+        width,
+        height,
+      );
+
+      const imageData = context.getImageData(0, 0, width, height);
+      const data = imageData.data;
+      const contrast = 1.22;
+      const midpoint = 128;
+
+      for (let index = 0; index < data.length; index += 4) {
+        const gray =
+          data[index] * 0.299 +
+          data[index + 1] * 0.587 +
+          data[index + 2] * 0.114;
+        const contrasted = Math.max(
+          0,
+          Math.min(255, (gray - midpoint) * contrast + midpoint),
+        );
+
+        data[index] = contrasted;
+        data[index + 1] = contrasted;
+        data[index + 2] = contrasted;
+      }
+
+      context.putImageData(imageData, 0, 0);
       return canvas;
     }
 

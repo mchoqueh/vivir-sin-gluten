@@ -40,6 +40,7 @@ export function ScannerResults({
 }: ScannerResultsProps) {
   const best = results[0];
   const hasHighConfidence = best && best.confidence >= 65;
+  const listResults = hasHighConfidence ? results.slice(1) : results;
 
   return (
     <section className="rounded-t-2xl border border-zinc-200 bg-white p-4 shadow-sm">
@@ -70,7 +71,7 @@ export function ScannerResults({
       ) : null}
 
       <div className="mt-4 grid gap-3">
-        {results.map((result) => (
+        {listResults.map((result) => (
           <ResultCard key={result.id} result={result} />
         ))}
         {results.length === 0 ? (
@@ -115,9 +116,11 @@ function ResultCard({
             ? "⚠️ No ha renovado análisis"
             : certificationStatusLabel(result.certificationStatus)}
         </span>
-        <span className="text-xs text-zinc-500">
-          Confianza {result.confidence}%
-        </span>
+        {result.confidence >= 55 ? (
+          <span className="text-xs text-zinc-500">
+            Confianza {result.confidence}%
+          </span>
+        ) : null}
       </div>
       <h3 className="mt-2 font-semibold text-zinc-950">{result.name}</h3>
       <dl className="mt-2 grid gap-1 text-sm text-zinc-600">
