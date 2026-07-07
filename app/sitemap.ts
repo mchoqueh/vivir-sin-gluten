@@ -4,9 +4,14 @@ import { siteUrl } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
+type SitemapProduct = {
+  id: string;
+  updatedAt: Date;
+};
+
 export default async function sitemap(): Promise<MetadataRoute.Sitemap> {
   const baseUrl = siteUrl();
-  const products = await prisma.officialItem.findMany({
+  const products: SitemapProduct[] = await prisma.officialItem.findMany({
     where: { active: true },
     select: {
       id: true,

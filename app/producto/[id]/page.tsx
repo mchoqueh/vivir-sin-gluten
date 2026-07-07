@@ -11,18 +11,82 @@ import {
 
 export const dynamic = "force-dynamic";
 
-const getProduct = cache(async (id: string) =>
+type ProductDetail = {
+  id: string;
+  sourceType: "FOOD" | "MEDICINE";
+  name: string;
+  company: string | null;
+  category: string | null;
+  subcategory: string | null;
+  certificationStatus:
+    | "CERTIFIED_GLUTEN_FREE"
+    | "NOT_RENEWED_ANALYSIS"
+    | "UNKNOWN";
+  active: boolean;
+  snapshots: Array<{
+    id: string;
+    rawName: string;
+    rawCategory: string | null;
+    rawSubcategory: string | null;
+    rawCompany: string | null;
+    certificationStatus:
+      | "CERTIFIED_GLUTEN_FREE"
+      | "NOT_RENEWED_ANALYSIS"
+      | "UNKNOWN";
+    createdAt: Date;
+    sync: {
+      status: "SUCCESS" | "FAILED" | "SKIPPED_NO_CHANGE";
+      createdAt: Date;
+    };
+  }>;
+  changes: Array<{
+    id: string;
+    type: "ADDED" | "REMOVED" | "MODIFIED";
+    title: string;
+    createdAt: Date;
+  }>;
+};
+
+const getProduct = cache(async (id: string): Promise<ProductDetail | null> =>
   prisma.officialItem.findUnique({
     where: { id },
-    include: {
+    select: {
+      id: true,
+      sourceType: true,
+      name: true,
+      company: true,
+      category: true,
+      subcategory: true,
+      certificationStatus: true,
+      active: true,
       snapshots: {
         orderBy: { createdAt: "desc" },
         take: 5,
-        include: { sync: true },
+        select: {
+          id: true,
+          rawName: true,
+          rawCategory: true,
+          rawSubcategory: true,
+          rawCompany: true,
+          certificationStatus: true,
+          createdAt: true,
+          sync: {
+            select: {
+              status: true,
+              createdAt: true,
+            },
+          },
+        },
       },
       changes: {
         orderBy: { createdAt: "desc" },
         take: 5,
+        select: {
+          id: true,
+          type: true,
+          title: true,
+          createdAt: true,
+        },
       },
     },
   }),

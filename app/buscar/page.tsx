@@ -24,6 +24,27 @@ type SearchParams = {
   company?: string | string[];
 };
 
+type SearchItem = {
+  id: string;
+  sourceType: "FOOD" | "MEDICINE";
+  name: string;
+  company: string | null;
+  category: string | null;
+  subcategory: string | null;
+  certificationStatus:
+    | "CERTIFIED_GLUTEN_FREE"
+    | "NOT_RENEWED_ANALYSIS"
+    | "UNKNOWN";
+};
+
+type CategoryOption = {
+  category: string | null;
+};
+
+type CompanyOption = {
+  company: string | null;
+};
+
 function firstParam(value: string | string[] | undefined) {
   return Array.isArray(value) ? value[0] : value;
 }
@@ -73,13 +94,26 @@ export default async function BuscarPage({
     ...(company ? { company } : {}),
   } satisfies Prisma.OfficialItemWhereInput;
 
-  const [items, categories, companies] = await Promise.all([
+  const [items, categories, companies]: [
+    SearchItem[],
+    CategoryOption[],
+    CompanyOption[],
+  ] = await Promise.all([
     prisma.officialItem.findMany({
       where: {
         ...baseWhere,
         ...(normalizedQuery
           ? { normalized: { contains: normalizedQuery } }
           : {}),
+      },
+      select: {
+        id: true,
+        sourceType: true,
+        name: true,
+        company: true,
+        category: true,
+        subcategory: true,
+        certificationStatus: true,
       },
       orderBy: [{ sourceType: "asc" }, { name: "asc" }],
       take: 80,

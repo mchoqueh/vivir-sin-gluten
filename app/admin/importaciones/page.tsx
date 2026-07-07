@@ -4,10 +4,27 @@ import { formatDate } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 
+type SourceSyncListItem = {
+  id: string;
+  sourceType: "FOOD" | "MEDICINE";
+  status: "SUCCESS" | "FAILED" | "SKIPPED_NO_CHANGE";
+  itemCount: number | null;
+  createdAt: Date;
+  error: string | null;
+};
+
 export default async function ImportacionesPage() {
-  const syncs = await prisma.sourceSync.findMany({
+  const syncs: SourceSyncListItem[] = await prisma.sourceSync.findMany({
     orderBy: { createdAt: "desc" },
     take: 50,
+    select: {
+      id: true,
+      sourceType: true,
+      status: true,
+      itemCount: true,
+      createdAt: true,
+      error: true,
+    },
   });
 
   return (

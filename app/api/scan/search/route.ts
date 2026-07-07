@@ -75,7 +75,7 @@ export async function POST(request: Request) {
     });
   }
 
-  const candidates = await prisma.officialItem.findMany({
+  const candidates: Candidate[] = await prisma.officialItem.findMany({
     where: {
       active: true,
       ...(sourceType === "ALL" ? {} : { sourceType }),
