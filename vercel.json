@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/cron/sync-convivir",
+      "schedule": "0 10 * * *"
+    }
+  ]
+}

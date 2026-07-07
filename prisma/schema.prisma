@@ -1,0 +1,128 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SourceType {
+  FOOD
+  MEDICINE
+}
+
+enum SyncStatus {
+  SUCCESS
+  FAILED
+  SKIPPED_NO_CHANGE
+}
+
+enum ChangeType {
+  ADDED
+  REMOVED
+  MODIFIED
+}
+
+enum ItemCertificationStatus {
+  CERTIFIED_GLUTEN_FREE
+  NOT_RENEWED_ANALYSIS
+  UNKNOWN
+}
+
+model OfficialItem {
+  id                  String                  @id @default(cuid())
+  sourceType          SourceType
+  name                String
+  brand               String?
+  company             String?
+  category            String?
+  subcategory         String?
+  certificationStatus ItemCertificationStatus @default(CERTIFIED_GLUTEN_FREE)
+  normalized          String
+  active              Boolean                 @default(true)
+  createdAt           DateTime                @default(now())
+  updatedAt           DateTime                @updatedAt
+
+  snapshots ItemSnapshot[]
+  favorites Favorite[]
+  changes   ItemChange[]
+
+  @@unique([sourceType, normalized])
+  @@index([sourceType])
+  @@index([active])
+  @@index([certificationStatus])
+  @@index([category])
+  @@index([subcategory])
+}
+
+model ItemSnapshot {
+  id                  String                  @id @default(cuid())
+  itemId              String
+  syncId              String
+  sourceType          SourceType
+  rawName             String
+  rawBrand            String?
+  rawCompany          String?
+  rawCategory         String?
+  rawSubcategory      String?
+  certificationStatus ItemCertificationStatus @default(CERTIFIED_GLUTEN_FREE)
+  rowHash             String
+  createdAt           DateTime                @default(now())
+
+  item OfficialItem @relation(fields: [itemId], references: [id])
+  sync SourceSync   @relation(fields: [syncId], references: [id])
+
+  @@index([syncId])
+  @@index([itemId])
+  @@index([rowHash])
+}
+
+model SourceSync {
+  id          String     @id @default(cuid())
+  sourceType  SourceType
+  url         String
+  fileHash    String
+  contentHash String?
+  status      SyncStatus
+  sourceDate  DateTime?
+  itemCount   Int?
+  error       String?
+  createdAt   DateTime   @default(now())
+
+  snapshots ItemSnapshot[]
+  changes   ItemChange[]
+
+  @@index([sourceType])
+  @@index([fileHash])
+  @@index([contentHash])
+  @@index([createdAt])
+}
+
+model ItemChange {
+  id          String     @id @default(cuid())
+  itemId      String?
+  syncId      String
+  sourceType  SourceType
+  type        ChangeType
+  title       String
+  description String?
+  createdAt   DateTime   @default(now())
+
+  item OfficialItem? @relation(fields: [itemId], references: [id])
+  sync SourceSync    @relation(fields: [syncId], references: [id])
+
+  @@index([sourceType])
+  @@index([type])
+  @@index([createdAt])
+}
+
+model Favorite {
+  id        String   @id @default(cuid())
+  itemId    String
+  label     String?
+  createdAt DateTime @default(now())
+
+  item OfficialItem @relation(fields: [itemId], references: [id])
+
+  @@unique([itemId])
+}
