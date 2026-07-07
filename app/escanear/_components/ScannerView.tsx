@@ -12,10 +12,10 @@ import {
   EXTENDED_SCAN_DURATION_MS,
   GLOBAL_CONFIDENCE_LOCK,
   MAX_SCAN_DURATION_MS,
+  MIN_RESULT_SCORE_TO_KEEP,
   MIN_STABLE_READS,
   OCR_BUFFER_SIZE,
   OCR_INTERVAL_MS,
-  RESULT_REPLACE_MARGIN,
   SEARCH_DEBOUNCE_MS,
   SOFT_LOCK_SCORE,
 } from "@/lib/scan/config";
@@ -57,6 +57,24 @@ type HeroReading = {
   timestamp: number;
 };
 
+type SessionTopResult = {
+  productId: string;
+  item: ScannerResult;
+  bestSearchScore: number;
+  bestGlobalConfidence: number;
+  bestCombinedScore: number;
+  firstSeenAt: number;
+  lastSeenAt: number;
+  timesSeen: number;
+  sourceText: string;
+};
+
+type RankedMergeResult = {
+  topEntries: SessionTopResult[];
+  topResults: ScannerResult[];
+  lockEntry: SessionTopResult | null;
+};
+
 function manualSearchHref(text: string, productType: ScannerProductType) {
   const params = new URLSearchParams();
   if (text.trim()) params.set("q", text.trim());
@@ -79,6 +97,11 @@ function isIOSWebKit() {
 function scannerUiLog(message: string, data?: unknown) {
   if (process.env.NODE_ENV !== "development") return;
   console.log(`[VSG scanner UI] ${message}`, data ?? "");
+}
+
+function scannerRankingLog(message: string, data?: unknown) {
+  if (process.env.NODE_ENV !== "development") return;
+  console.log(`[scanner] ${message}`, data ?? "");
 }
 
 function scannerStateLabel(state: ScannerState) {
@@ -136,6 +159,29 @@ function findPersistentDifferentHero(
   return "";
 }
 
+function resultSearchScore(result: ScannerResult) {
+  return Math.max(result.score, result.confidence);
+}
+
+function sortSessionTopResults(entries: SessionTopResult[]) {
+  return [...entries].sort(
+    (left, right) =>
+      right.bestCombinedScore - left.bestCombinedScore ||
+      right.bestGlobalConfidence - left.bestGlobalConfidence ||
+      right.bestSearchScore - left.bestSearchScore ||
+      right.timesSeen - left.timesSeen ||
+      right.lastSeenAt - left.lastSeenAt,
+  );
+}
+
+function rankedResultsFromSession(
+  ranking: Map<string, SessionTopResult>,
+): ScannerResult[] {
+  return sortSessionTopResults(Array.from(ranking.values()))
+    .slice(0, 3)
+    .map((entry) => entry.item);
+}
+
 export function ScannerView() {
   const {
     videoRef,
@@ -178,6 +224,9 @@ export function ScannerView() {
   const stableSecondaryTokensRef = useRef<string[]>([]);
   const candidateBufferRef = useRef<CandidateReading[]>([]);
   const globalConfidenceRef = useRef(0);
+  const sessionTopResultsRef = useRef<Map<string, SessionTopResult>>(
+    new Map(),
+  );
   const scannerStateRef = useRef<ScannerState>("IDLE");
   const lockedResultRef = useRef<ScannerResult | null>(null);
   const activeSessionIdRef = useRef(0);
@@ -237,6 +286,19 @@ export function ScannerView() {
         hasLockedResult: Boolean(lockedResultRef.current),
         globalConfidence: globalConfidenceRef.current,
       });
+      return;
+    }
+
+    const rankedResults = rankedResultsFromSession(sessionTopResultsRef.current);
+    if (rankedResults.length > 0) {
+      scannerUiLog("timeout kept session ranking", {
+        count: rankedResults.length,
+        topScore: rankedResults[0]?.score,
+      });
+      scanExpiredRef.current = true;
+      setPaused(true);
+      setResults(rankedResults);
+      setSearchState("done");
       return;
     }
 
@@ -473,6 +535,126 @@ export function ScannerView() {
     [],
   );
 
+  const mergeResultsIntoSessionRanking = useCallback(
+    ({
+      nextResults,
+      stableText,
+      globalConfidenceProductId,
+      globalConfidence,
+    }: {
+      nextResults: ScannerResult[];
+      stableText: string;
+      globalConfidenceProductId: string | null;
+      globalConfidence: number;
+    }): RankedMergeResult => {
+      if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
+        scannerRankingLog("ignored update because lockedResult exists", {
+          source: "session-ranking",
+        });
+        const topEntries = sortSessionTopResults(
+          Array.from(sessionTopResultsRef.current.values()),
+        ).slice(0, 3);
+        return {
+          topEntries,
+          topResults: topEntries.map((entry) => entry.item),
+          lockEntry: null,
+        };
+      }
+
+      scannerRankingLog("merging results into session ranking", {
+        incoming: nextResults.length,
+        stableText,
+      });
+
+      const now = Date.now();
+      const ranking = sessionTopResultsRef.current;
+
+      for (const result of nextResults) {
+        const searchScore = resultSearchScore(result);
+        if (searchScore < MIN_RESULT_SCORE_TO_KEEP) {
+          scannerRankingLog("ignored low score result", {
+            productId: result.id,
+            searchScore,
+          });
+          continue;
+        }
+
+        const existing = ranking.get(result.id);
+        const resultGlobalConfidence =
+          result.id === globalConfidenceProductId ? globalConfidence : 0;
+        const bestSearchScore = Math.max(
+          existing?.bestSearchScore ?? 0,
+          searchScore,
+        );
+        const bestGlobalConfidence = Math.max(
+          existing?.bestGlobalConfidence ?? 0,
+          resultGlobalConfidence,
+        );
+        const bestCombinedScore = Math.max(
+          existing?.bestCombinedScore ?? 0,
+          bestSearchScore,
+          bestGlobalConfidence,
+        );
+        const shouldUseNewItem =
+          !existing ||
+          searchScore > existing.bestSearchScore ||
+          resultGlobalConfidence > existing.bestGlobalConfidence ||
+          bestCombinedScore > existing.bestCombinedScore;
+
+        if (existing && !shouldUseNewItem) {
+          scannerRankingLog("keeping previous better score", {
+            productId: result.id,
+            previous: existing.bestCombinedScore,
+            incoming: Math.max(searchScore, resultGlobalConfidence),
+          });
+        }
+
+        ranking.set(result.id, {
+          productId: result.id,
+          item: {
+            ...(shouldUseNewItem ? result : existing.item),
+            score: bestSearchScore,
+            confidence: Math.round(bestCombinedScore),
+          },
+          bestSearchScore,
+          bestGlobalConfidence,
+          bestCombinedScore,
+          firstSeenAt: existing?.firstSeenAt ?? now,
+          lastSeenAt: now,
+          timesSeen: (existing?.timesSeen ?? 0) + 1,
+          sourceText: stableText || existing?.sourceText || "",
+        });
+      }
+
+      const topEntries = sortSessionTopResults(Array.from(ranking.values()));
+      const visibleEntries = topEntries.slice(0, 3);
+      const topResults = visibleEntries.map((entry) => entry.item);
+      const lockEntry =
+        topEntries.find(
+          (entry) => entry.bestGlobalConfidence >= GLOBAL_CONFIDENCE_LOCK,
+        ) ?? null;
+
+      setResults(topResults);
+      scannerRankingLog("top results updated", {
+        count: topResults.length,
+        top: visibleEntries.map((entry) => ({
+          productId: entry.productId,
+          bestCombinedScore: entry.bestCombinedScore,
+          bestGlobalConfidence: entry.bestGlobalConfidence,
+          bestSearchScore: entry.bestSearchScore,
+          timesSeen: entry.timesSeen,
+        })),
+      });
+
+      return {
+        topEntries: visibleEntries,
+        topResults,
+        lockEntry,
+      };
+    },
+    [],
+  );
+
   const applySearchResults = useCallback(
     (
       nextResults: ScannerResult[],
@@ -498,7 +680,7 @@ export function ScannerView() {
       }
 
       if (scannerStateRef.current === "FOUND" || lockedResultRef.current) {
-        scannerUiLog("ignored update because FOUND", {
+        scannerRankingLog("ignored update because lockedResult exists", {
           source: "applySearchResults",
         });
         return;
@@ -508,7 +690,6 @@ export function ScannerView() {
       pendingSearchRef.current = false;
 
       const nextBest = nextResults[0];
-      const currentBest = results[0];
 
       if (!nextBest) {
         if (scanExpiredRef.current) {
@@ -516,12 +697,13 @@ export function ScannerView() {
           return;
         }
 
-        if (currentBest && currentBest.score >= SOFT_LOCK_SCORE) {
+        if (sessionTopResultsRef.current.size > 0) {
+          setResults(rankedResultsFromSession(sessionTopResultsRef.current));
           setSearchState("done");
           return;
         }
 
-        setSearchState("no_match");
+        setSearchState("idle");
         return;
       }
 
@@ -548,7 +730,7 @@ export function ScannerView() {
         nextBest.id,
       );
       const rawGlobalConfidence = calculateGlobalConfidence({
-        searchScore: nextBest.score,
+        searchScore: resultSearchScore(nextBest),
         heroStability,
         qualityScore,
         candidatePersistence,
@@ -559,18 +741,31 @@ export function ScannerView() {
       );
       globalConfidenceRef.current = nextGlobalConfidence;
       setConfidenceMetrics({
-        searchScore: nextBest.score,
+        searchScore: resultSearchScore(nextBest),
         heroStability,
         qualityScore,
         candidatePersistence,
         globalConfidence: nextGlobalConfidence,
       });
 
-      if (nextGlobalConfidence >= GLOBAL_CONFIDENCE_LOCK) {
+      const rankedMerge = mergeResultsIntoSessionRanking({
+        nextResults,
+        stableText,
+        globalConfidenceProductId: nextBest.id,
+        globalConfidence: nextGlobalConfidence,
+      });
+
+      if (rankedMerge.lockEntry) {
+        scannerRankingLog("FOUND from session ranking", {
+          productId: rankedMerge.lockEntry.productId,
+          bestGlobalConfidence: rankedMerge.lockEntry.bestGlobalConfidence,
+          bestCombinedScore: rankedMerge.lockEntry.bestCombinedScore,
+          timesSeen: rankedMerge.lockEntry.timesSeen,
+        });
         lockFoundResult({
-          nextResults,
-          result: nextBest,
-          stableText,
+          nextResults: rankedMerge.topResults,
+          result: rankedMerge.lockEntry.item,
+          stableText: rankedMerge.lockEntry.sourceText || stableText,
           requestId,
           sessionId,
         });
@@ -582,22 +777,17 @@ export function ScannerView() {
         return;
       }
 
-      const textChangedCompletely =
-        lastResultsTextRef.current &&
-        !areSearchTextsSimilar(lastResultsTextRef.current, stableText);
-      const shouldReplace =
-        !currentBest ||
-        nextBest.score >= currentBest.score + RESULT_REPLACE_MARGIN ||
-        (textChangedCompletely && nextBest.score >= SOFT_LOCK_SCORE);
-
-      if (shouldReplace) {
-        setResults(nextResults);
+      if (rankedMerge.topResults.length > 0) {
         lastResultsTextRef.current = stableText;
       }
-
       setSearchState("done");
     },
-    [finalizeNoMatch, lockFoundResult, results, searchState],
+    [
+      finalizeNoMatch,
+      lockFoundResult,
+      mergeResultsIntoSessionRanking,
+      searchState,
+    ],
   );
 
   useEffect(() => {
@@ -872,6 +1062,7 @@ export function ScannerView() {
     stableSecondaryTokensRef.current = [];
     candidateBufferRef.current = [];
     globalConfidenceRef.current = 0;
+    sessionTopResultsRef.current.clear();
     bestReadingRef.current = null;
     ocrBufferRef.current = [];
     pendingSearchRef.current = false;

@@ -8,6 +8,7 @@ export const SOFT_LOCK_SCORE = 70;
 export const HIGH_CONFIDENCE_SCORE = 85;
 export const RESULT_REPLACE_MARGIN = 8;
 export const GLOBAL_CONFIDENCE_LOCK = 90;
+export const MIN_RESULT_SCORE_TO_KEEP = 65;
 export const SEARCH_SCORE_WEIGHT = 0.4;
 export const HERO_STABILITY_WEIGHT = 0.25;
 export const OCR_QUALITY_WEIGHT = 0.2;
