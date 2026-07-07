@@ -7,12 +7,38 @@ import {
   hasUsefulOcrText,
   normalizeProductSearchText,
 } from "@/lib/scan/normalize";
+import {
+  HIGH_CONFIDENCE_SCORE,
+  MIN_STABLE_READS,
+  OCR_BUFFER_SIZE,
+  OCR_INTERVAL_MS,
+  RESULT_REPLACE_MARGIN,
+  SEARCH_DEBOUNCE_MS,
+  SOFT_LOCK_SCORE,
+} from "@/lib/scan/config";
+import {
+  buildOcrReading,
+  countSimilarReadings,
+  isReadingBetter,
+  shouldSearchReading,
+  type OcrReading,
+} from "@/lib/scan/stability";
 import { ProductTypeFilter, type ScannerProductType } from "./ProductTypeFilter";
 import { ScannerResults, type ScannerResult } from "./ScannerResults";
 import { useCameraScanner } from "../_hooks/useCameraScanner";
 import { useOcrScanner } from "../_hooks/useOcrScanner";
 
-type SearchState = "idle" | "searching" | "done" | "error";
+type SearchState = "idle" | "searching" | "done" | "no_results" | "error";
+type ScannerState =
+  | "IDLE"
+  | "SCANNING"
+  | "DETECTING_TEXT"
+  | "CONFIRMING"
+  | "SEARCHING"
+  | "PROBABLE_MATCH"
+  | "FOUND"
+  | "NO_RESULTS"
+  | "ERROR";
 
 function manualSearchHref(text: string, productType: ScannerProductType) {
   const params = new URLSearchParams();
@@ -34,7 +60,32 @@ function isIOSWebKit() {
 }
 
 function scannerUiLog(message: string, data?: unknown) {
+  if (process.env.NODE_ENV !== "development") return;
   console.log(`[VSG scanner UI] ${message}`, data ?? "");
+}
+
+function scannerStateLabel(state: ScannerState) {
+  switch (state) {
+    case "FOUND":
+      return "Producto encontrado";
+    case "PROBABLE_MATCH":
+      return "Coincidencia probable";
+    case "SEARCHING":
+      return "Buscando coincidencias...";
+    case "CONFIRMING":
+      return "Confirmando lectura...";
+    case "DETECTING_TEXT":
+      return "Detectando texto util...";
+    case "NO_RESULTS":
+      return "Sin coincidencias claras";
+    case "ERROR":
+      return "Hay un problema con el escaner";
+    case "SCANNING":
+      return "Buscando texto...";
+    case "IDLE":
+    default:
+      return "Camara pendiente de activacion";
+  }
 }
 
 export function ScannerView() {
@@ -49,11 +100,18 @@ export function ScannerView() {
   const [productType, setProductType] = useState<ScannerProductType>("ALL");
   const [paused, setPaused] = useState(false);
   const [detectedText, setDetectedText] = useState("");
+  const [bestStableText, setBestStableText] = useState("");
   const [results, setResults] = useState<ScannerResult[]>([]);
+  const [lockedResult, setLockedResult] = useState<ScannerResult | null>(null);
+  const [lockedText, setLockedText] = useState("");
   const [searchState, setSearchState] = useState<SearchState>("idle");
   const [searchError, setSearchError] = useState<string | null>(null);
   const startingCameraRef = useRef(false);
+  const ocrBufferRef = useRef<OcrReading[]>([]);
+  const bestReadingRef = useRef<OcrReading | null>(null);
   const lastAcceptedTextRef = useRef("");
+  const lastResultsTextRef = useRef("");
+  const requestIdRef = useRef(0);
   const searchCacheRef = useRef(new Map<string, ScannerResult[]>());
   const scanningEnabled = isCameraReady && !paused;
   const showStartOverlay =
@@ -61,36 +119,123 @@ export function ScannerView() {
     cameraStatus === "closed" ||
     cameraStatus === "error";
 
-  const handleDetectedText = useCallback((text: string) => {
-    if (normalizeProductSearchText(text).length < 3) return;
+  const handleDetectedText = useCallback(
+    (text: string) => {
+      if (lockedResult) return;
+      if (normalizeProductSearchText(text).length < 3) return;
 
-    if (!hasUsefulOcrText(text)) {
+      const reading = buildOcrReading(text, bestReadingRef.current?.rawText);
+      const nextBuffer = [...ocrBufferRef.current, reading].slice(
+        -OCR_BUFFER_SIZE,
+      );
+      ocrBufferRef.current = nextBuffer;
       setDetectedText(text);
-      setResults([]);
-      setSearchState("idle");
-      return;
-    }
 
-    if (areSearchTextsSimilar(lastAcceptedTextRef.current, text)) {
-      return;
-    }
+      const similarReadCount = countSimilarReadings(nextBuffer, reading);
+      const enoughEvidence =
+        similarReadCount >= MIN_STABLE_READS ||
+        shouldSearchReading(reading, similarReadCount);
 
-    lastAcceptedTextRef.current = text;
-    setDetectedText(text);
-  }, []);
+      if (!enoughEvidence) {
+        if (!hasUsefulOcrText(text)) setSearchState("idle");
+        return;
+      }
+
+      if (!isReadingBetter(bestReadingRef.current, reading)) {
+        return;
+      }
+
+      if (areSearchTextsSimilar(lastAcceptedTextRef.current, reading.rawText)) {
+        bestReadingRef.current = reading;
+        return;
+      }
+
+      bestReadingRef.current = reading;
+      lastAcceptedTextRef.current = reading.rawText;
+      setBestStableText(reading.rawText);
+    },
+    [lockedResult],
+  );
 
   const { status: ocrStatus, error: ocrError } = useOcrScanner({
     videoRef,
     enabled: scanningEnabled,
-    intervalMs: 1400,
+    intervalMs: OCR_INTERVAL_MS,
     onText: handleDetectedText,
   });
 
   const manualHref = useMemo(
-    () => manualSearchHref(detectedText, productType),
-    [detectedText, productType],
+    () => manualSearchHref(bestStableText || detectedText, productType),
+    [bestStableText, detectedText, productType],
   );
   const hasUsefulDetectedText = hasUsefulOcrText(detectedText);
+  const scannerState: ScannerState = useMemo(() => {
+    if (cameraError || ocrError || searchState === "error") return "ERROR";
+    if (lockedResult) return "FOUND";
+    if (searchState === "searching") return "SEARCHING";
+    if (results.length > 0) return "PROBABLE_MATCH";
+    if (searchState === "no_results") return "NO_RESULTS";
+    if (detectedText && !hasUsefulDetectedText) return "DETECTING_TEXT";
+    if (bestStableText) return "CONFIRMING";
+    if (scanningEnabled) return "SCANNING";
+    return "IDLE";
+  }, [
+    bestStableText,
+    cameraError,
+    detectedText,
+    hasUsefulDetectedText,
+    lockedResult,
+    ocrError,
+    results.length,
+    scanningEnabled,
+    searchState,
+  ]);
+
+  const applySearchResults = useCallback(
+    (nextResults: ScannerResult[], stableText: string, requestId: number) => {
+      if (requestId !== requestIdRef.current) return;
+      if (lockedResult) return;
+
+      const nextBest = nextResults[0];
+      const currentBest = results[0];
+
+      if (!nextBest) {
+        if (currentBest && currentBest.score >= SOFT_LOCK_SCORE) {
+          setSearchState("done");
+          return;
+        }
+
+        setSearchState("no_results");
+        return;
+      }
+
+      if (nextBest.score >= HIGH_CONFIDENCE_SCORE) {
+        setResults(nextResults);
+        setLockedResult(nextBest);
+        setLockedText(stableText);
+        setPaused(true);
+        setSearchState("done");
+        lastResultsTextRef.current = stableText;
+        return;
+      }
+
+      const textChangedCompletely =
+        lastResultsTextRef.current &&
+        !areSearchTextsSimilar(lastResultsTextRef.current, stableText);
+      const shouldReplace =
+        !currentBest ||
+        nextBest.score >= currentBest.score + RESULT_REPLACE_MARGIN ||
+        (textChangedCompletely && nextBest.score >= SOFT_LOCK_SCORE);
+
+      if (shouldReplace) {
+        setResults(nextResults);
+        lastResultsTextRef.current = stableText;
+      }
+
+      setSearchState("done");
+    },
+    [lockedResult, results],
+  );
 
   useEffect(() => {
     scannerUiLog("mount", {
@@ -109,18 +254,22 @@ export function ScannerView() {
   }, [startCamera]);
 
   useEffect(() => {
-    const normalized = normalizeProductSearchText(detectedText);
-    if (normalized.length < 3 || !hasUsefulOcrText(detectedText)) {
+    if (lockedResult) return;
+
+    const normalized = normalizeProductSearchText(bestStableText);
+    if (normalized.length < 3 || !hasUsefulOcrText(bestStableText)) {
       return;
     }
 
     const controller = new AbortController();
     const cacheKey = `${productType}:${normalized}`;
+    const requestId = requestIdRef.current + 1;
+    requestIdRef.current = requestId;
+
     const timeoutId = window.setTimeout(async () => {
       const cachedResults = searchCacheRef.current.get(cacheKey);
       if (cachedResults) {
-        setResults(cachedResults);
-        setSearchState("done");
+        applySearchResults(cachedResults, bestStableText, requestId);
         return;
       }
 
@@ -131,7 +280,7 @@ export function ScannerView() {
         const response = await fetch("/api/scan/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: detectedText, type: productType }),
+          body: JSON.stringify({ text: bestStableText, type: productType }),
           signal: controller.signal,
         });
 
@@ -145,10 +294,10 @@ export function ScannerView() {
 
         const nextResults = payload.results ?? [];
         searchCacheRef.current.set(cacheKey, nextResults);
-        setResults(nextResults);
-        setSearchState("done");
+        applySearchResults(nextResults, bestStableText, requestId);
       } catch (error) {
         if (controller.signal.aborted) return;
+        if (requestId !== requestIdRef.current) return;
 
         setSearchState("error");
         setSearchError(
@@ -157,13 +306,13 @@ export function ScannerView() {
             : "No se pudo buscar coincidencias.",
         );
       }
-    }, 650);
+    }, SEARCH_DEBOUNCE_MS);
 
     return () => {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [detectedText, productType]);
+  }, [applySearchResults, bestStableText, lockedResult, productType]);
 
   async function openCameraFromUserAction() {
     scannerUiLog("openCameraFromUserAction:called", {
@@ -191,8 +340,22 @@ export function ScannerView() {
     scannerUiLog("retry:called", { cameraStatus, isCameraReady });
     setPaused(false);
     setResults([]);
+    setLockedResult(null);
+    setLockedText("");
+    setBestStableText("");
     setDetectedText("");
+    setSearchState("idle");
+    lastAcceptedTextRef.current = "";
+    lastResultsTextRef.current = "";
+    bestReadingRef.current = null;
+    ocrBufferRef.current = [];
     if (!isCameraReady) void openCameraFromUserAction();
+  }
+
+  function continueScanning() {
+    setPaused(false);
+    setLockedResult(null);
+    setLockedText("");
   }
 
   function closeCamera() {
@@ -275,26 +438,28 @@ export function ScannerView() {
                 : ocrStatus === "loading"
                   ? "Cargando OCR local..."
                   : ocrStatus === "scanning"
-                    ? "Buscando texto..."
+                    ? scannerStateLabel(scannerState)
                     : paused
                       ? "Escaneo pausado"
                       : isCameraReady
-                        ? "Buscando texto..."
-                        : "Camara pendiente de activacion"}
+                        ? scannerStateLabel(scannerState)
+                        : scannerStateLabel(scannerState)}
             </p>
           </div>
 
           <div className="absolute inset-x-3 bottom-3 rounded-xl bg-black/70 p-3 text-white">
             <p className="text-xs uppercase text-white/60">Texto detectado</p>
             <p className="mt-1 line-clamp-3 text-sm">
-              {detectedText || "Aun no hay texto suficiente."}
+              {bestStableText || detectedText || "Aun no hay texto suficiente."}
             </p>
             <p className="mt-2 text-xs text-white/70">
-              {detectedText && !hasUsefulDetectedText
-                ? "Detectando texto util..."
+              {lockedResult
+                ? `Lectura bloqueada: ${lockedText}`
+                : detectedText && !hasUsefulDetectedText
+                  ? "Detectando texto util..."
                 : searchState === "searching"
-                ? "Buscando coincidencias..."
-                : searchState === "error"
+                  ? "Buscando coincidencias..."
+                  : searchState === "error"
                   ? searchError
                   : "Buscando coincidencias en la base oficial."}
             </p>
@@ -344,8 +509,13 @@ export function ScannerView() {
       <div className="mt-5 flex-1">
         <ScannerResults
           results={results}
-          detectedText={detectedText}
+          detectedText={bestStableText || detectedText}
           productType={productType}
+          scannerState={scannerState}
+          lockedResult={lockedResult}
+          lockedText={lockedText}
+          onContinueScanning={continueScanning}
+          onSearchAgain={retry}
         />
       </div>
     </div>

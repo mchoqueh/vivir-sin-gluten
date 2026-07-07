@@ -15,10 +15,26 @@ export type ScannerResult = {
   confidence: number;
 };
 
+type ScannerState =
+  | "IDLE"
+  | "SCANNING"
+  | "DETECTING_TEXT"
+  | "CONFIRMING"
+  | "SEARCHING"
+  | "PROBABLE_MATCH"
+  | "FOUND"
+  | "NO_RESULTS"
+  | "ERROR";
+
 type ScannerResultsProps = {
   results: ScannerResult[];
   detectedText: string;
   productType: "ALL" | "FOOD" | "MEDICINE";
+  scannerState: ScannerState;
+  lockedResult: ScannerResult | null;
+  lockedText: string;
+  onContinueScanning: () => void;
+  onSearchAgain: () => void;
 };
 
 function manualSearchHref(
@@ -37,20 +53,33 @@ export function ScannerResults({
   results,
   detectedText,
   productType,
+  scannerState,
+  lockedResult,
+  lockedText,
+  onContinueScanning,
+  onSearchAgain,
 }: ScannerResultsProps) {
-  const best = results[0];
+  const best = lockedResult ?? results[0];
   const hasHighConfidence = best && best.confidence >= 65;
-  const listResults = hasHighConfidence ? results.slice(1) : results;
+  const listResults = hasHighConfidence
+    ? results.filter((result) => result.id !== best.id)
+    : results;
 
   return (
     <section className="rounded-t-2xl border border-zinc-200 bg-white p-4 shadow-sm">
       <div className="flex items-center justify-between gap-3">
         <div>
-          <h2 className="text-lg font-semibold">Coincidencias probables</h2>
+          <h2 className="text-lg font-semibold">
+            {scannerState === "FOUND"
+              ? "Producto encontrado"
+              : "Coincidencias probables"}
+          </h2>
           <p className="text-sm text-zinc-600">
-            {results.length > 0
-              ? `${results.length} resultado${results.length === 1 ? "" : "s"}`
-              : "Sin coincidencias todavía"}
+            {scannerState === "FOUND"
+              ? "Resultado bloqueado con alta confianza"
+              : results.length > 0
+                ? `${results.length} resultado${results.length === 1 ? "" : "s"}`
+                : "Sin coincidencias todavia"}
           </p>
         </div>
         <Link
@@ -61,10 +90,44 @@ export function ScannerResults({
         </Link>
       </div>
 
-      {hasHighConfidence ? (
+      {lockedResult ? (
+        <div className="mt-4 rounded-md border border-emerald-300 bg-emerald-50 p-3">
+          <p className="text-xs font-medium uppercase text-emerald-800">
+            Producto encontrado
+          </p>
+          {lockedText ? (
+            <p className="mt-1 text-xs text-emerald-800">
+              Lectura confirmada: {lockedText}
+            </p>
+          ) : null}
+          <ResultCard result={lockedResult} highlighted />
+          <div className="mt-3 grid gap-2 sm:grid-cols-3">
+            <button
+              type="button"
+              onClick={onContinueScanning}
+              className="rounded-md border border-emerald-300 bg-white px-3 py-2 text-sm font-semibold text-emerald-800"
+            >
+              Seguir escaneando
+            </button>
+            <button
+              type="button"
+              onClick={onSearchAgain}
+              className="rounded-md border border-zinc-300 bg-white px-3 py-2 text-sm font-semibold text-zinc-800"
+            >
+              Buscar nuevamente
+            </button>
+            <Link
+              href={`/producto/${lockedResult.id}`}
+              className="rounded-md bg-emerald-700 px-3 py-2 text-center text-sm font-semibold text-white"
+            >
+              Ver detalle
+            </Link>
+          </div>
+        </div>
+      ) : hasHighConfidence ? (
         <div className="mt-4 rounded-md border border-emerald-200 bg-emerald-50 p-3">
           <p className="text-xs font-medium uppercase text-emerald-800">
-            Coincidencia principal
+            Coincidencia probable
           </p>
           <ResultCard result={best} highlighted />
         </div>
@@ -74,9 +137,9 @@ export function ScannerResults({
         {listResults.map((result) => (
           <ResultCard key={result.id} result={result} />
         ))}
-        {results.length === 0 ? (
+        {results.length === 0 && !lockedResult ? (
           <p className="rounded-md border border-dashed border-zinc-300 p-4 text-sm text-zinc-600">
-            Apunta al frente del producto o usa la búsqueda manual con el texto
+            Apunta al frente del producto o usa la busqueda manual con el texto
             detectado.
           </p>
         ) : null}
@@ -113,7 +176,7 @@ function ResultCard({
           }`}
         >
           {result.certificationStatus === "NOT_RENEWED_ANALYSIS"
-            ? "⚠️ No ha renovado análisis"
+            ? "No ha renovado analisis"
             : certificationStatusLabel(result.certificationStatus)}
         </span>
         {result.confidence >= 55 ? (
@@ -129,11 +192,11 @@ function ResultCard({
           <dd className="inline">{result.company ?? "Sin dato"}</dd>
         </div>
         <div>
-          <dt className="inline font-medium">Categoría: </dt>
+          <dt className="inline font-medium">Categoria: </dt>
           <dd className="inline">{result.category ?? "Sin dato"}</dd>
         </div>
         <div>
-          <dt className="inline font-medium">Subcategoría: </dt>
+          <dt className="inline font-medium">Subcategoria: </dt>
           <dd className="inline">{result.subcategory ?? "Sin dato"}</dd>
         </div>
       </dl>

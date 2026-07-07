@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 type CameraStatus = "idle" | "starting" | "ready" | "closed" | "error";
 
 function scannerLog(message: string, data?: unknown) {
+  if (process.env.NODE_ENV !== "development") return;
   console.log(`[VSG scanner] ${message}`, data ?? "");
 }
 
