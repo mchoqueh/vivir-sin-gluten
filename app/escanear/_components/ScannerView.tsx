@@ -6,6 +6,7 @@ import {
   areSearchTextsSimilar,
   hasUsefulOcrText,
   normalizeProductSearchText,
+  tokenizeProductSearchText,
 } from "@/lib/scan/normalize";
 import {
   HIGH_CONFIDENCE_SCORE,
@@ -40,6 +41,12 @@ type ScannerState =
   | "FOUND"
   | "NO_RESULTS"
   | "ERROR";
+
+type HeroReading = {
+  rawText: string;
+  normalizedText: string;
+  timestamp: number;
+};
 
 function manualSearchHref(text: string, productType: ScannerProductType) {
   const params = new URLSearchParams();
@@ -89,6 +96,37 @@ function scannerStateLabel(state: ScannerState) {
   }
 }
 
+function buildHeroReading(heroText: string): HeroReading | null {
+  const normalizedText = normalizeProductSearchText(heroText);
+  if (normalizedText.length < 3) return null;
+
+  return {
+    rawText: heroText,
+    normalizedText,
+    timestamp: Date.now(),
+  };
+}
+
+function countSimilarHeroReadings(readings: HeroReading[], heroText: string) {
+  return readings.filter((reading) =>
+    areSearchTextsSimilar(reading.rawText, heroText),
+  ).length;
+}
+
+function findPersistentDifferentHero(
+  readings: HeroReading[],
+  stableHeroText: string,
+) {
+  for (const reading of readings) {
+    if (areSearchTextsSimilar(reading.rawText, stableHeroText)) continue;
+
+    const similarCount = countSimilarHeroReadings(readings, reading.rawText);
+    if (similarCount >= 3) return reading.rawText;
+  }
+
+  return "";
+}
+
 export function ScannerView() {
   const {
     videoRef,
@@ -103,6 +141,8 @@ export function ScannerView() {
   const [detectedText, setDetectedText] = useState("");
   const [bestStableText, setBestStableText] = useState("");
   const [heroText, setHeroText] = useState("");
+  const [stableHeroText, setStableHeroText] = useState("");
+  const [heroPersistenceCount, setHeroPersistenceCount] = useState(0);
   const [secondaryText, setSecondaryText] = useState("");
   const [results, setResults] = useState<ScannerResult[]>([]);
   const [lockedResult, setLockedResult] = useState<ScannerResult | null>(null);
@@ -111,6 +151,8 @@ export function ScannerView() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const startingCameraRef = useRef(false);
   const ocrBufferRef = useRef<OcrReading[]>([]);
+  const heroBufferRef = useRef<HeroReading[]>([]);
+  const stableHeroTextRef = useRef("");
   const bestReadingRef = useRef<OcrReading | null>(null);
   const lastAcceptedTextRef = useRef("");
   const lastResultsTextRef = useRef("");
@@ -127,17 +169,63 @@ export function ScannerView() {
   const handleDetectedText = useCallback(
     (ocrResult: VisualOcrResult) => {
       if (lockedResult) return;
-      const text = ocrResult.prioritizedText || ocrResult.rawText;
+      const heroReading = buildHeroReading(ocrResult.heroText);
+      let nextStableHeroText = stableHeroTextRef.current;
+
+      if (heroReading) {
+        const nextHeroBuffer = [...heroBufferRef.current, heroReading].slice(-4);
+        heroBufferRef.current = nextHeroBuffer;
+
+        const similarHeroCount = countSimilarHeroReadings(
+          nextHeroBuffer,
+          heroReading.rawText,
+        );
+        setHeroPersistenceCount(similarHeroCount);
+
+        if (!nextStableHeroText && similarHeroCount >= 2) {
+          nextStableHeroText = heroReading.rawText;
+          stableHeroTextRef.current = nextStableHeroText;
+          setStableHeroText(nextStableHeroText);
+        } else if (nextStableHeroText) {
+          const stableCount = countSimilarHeroReadings(
+            nextHeroBuffer,
+            nextStableHeroText,
+          );
+          setHeroPersistenceCount(stableCount);
+
+          const replacementHero = findPersistentDifferentHero(
+            nextHeroBuffer,
+            nextStableHeroText,
+          );
+          if (replacementHero) {
+            nextStableHeroText = replacementHero;
+            stableHeroTextRef.current = replacementHero;
+            setStableHeroText(replacementHero);
+            setHeroPersistenceCount(
+              countSimilarHeroReadings(nextHeroBuffer, replacementHero),
+            );
+          }
+        }
+      }
+
+      const text = nextStableHeroText
+        ? `${nextStableHeroText} ${ocrResult.secondaryText} ${ocrResult.rawText}`
+        : ocrResult.prioritizedText || ocrResult.rawText;
       if (normalizeProductSearchText(text).length < 3) return;
+      const dominantTokens = nextStableHeroText
+        ? tokenizeProductSearchText(
+            `${nextStableHeroText} ${ocrResult.heroText}`,
+          )
+        : ocrResult.dominantTokens;
 
       const reading = buildOcrReading(
         text,
         bestReadingRef.current?.rawText,
         Date.now(),
         {
-          heroText: ocrResult.heroText,
+          heroText: nextStableHeroText || ocrResult.heroText,
           secondaryText: ocrResult.secondaryText,
-          dominantTokens: ocrResult.dominantTokens,
+          dominantTokens,
           secondaryTokens: ocrResult.secondaryTokens,
         },
       );
@@ -170,7 +258,9 @@ export function ScannerView() {
 
       bestReadingRef.current = reading;
       lastAcceptedTextRef.current = reading.rawText;
-      stableDominantTokensRef.current = reading.dominantTokens;
+      stableDominantTokensRef.current = nextStableHeroText
+        ? tokenizeProductSearchText(nextStableHeroText)
+        : reading.dominantTokens;
       stableSecondaryTokensRef.current = reading.secondaryTokens;
       setBestStableText(reading.rawText);
     },
@@ -185,8 +275,12 @@ export function ScannerView() {
   });
 
   const manualHref = useMemo(
-    () => manualSearchHref(bestStableText || detectedText, productType),
-    [bestStableText, detectedText, productType],
+    () =>
+      manualSearchHref(
+        stableHeroText || bestStableText || detectedText,
+        productType,
+      ),
+    [bestStableText, detectedText, productType, stableHeroText],
   );
   const hasUsefulDetectedText = hasUsefulOcrText(detectedText);
   const scannerState: ScannerState = useMemo(() => {
@@ -276,8 +370,11 @@ export function ScannerView() {
   useEffect(() => {
     if (lockedResult) return;
 
-    const normalized = normalizeProductSearchText(bestStableText);
-    if (normalized.length < 3 || !hasUsefulOcrText(bestStableText)) {
+    const searchText = stableHeroText
+      ? `${stableHeroText} ${bestStableText}`
+      : bestStableText;
+    const normalized = normalizeProductSearchText(searchText);
+    if (normalized.length < 3 || !hasUsefulOcrText(searchText)) {
       return;
     }
 
@@ -291,7 +388,7 @@ export function ScannerView() {
     const timeoutId = window.setTimeout(async () => {
       const cachedResults = searchCacheRef.current.get(cacheKey);
       if (cachedResults) {
-        applySearchResults(cachedResults, bestStableText, requestId);
+        applySearchResults(cachedResults, searchText, requestId);
         return;
       }
 
@@ -303,7 +400,7 @@ export function ScannerView() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            text: bestStableText,
+            text: searchText,
             type: productType,
             dominantTokens: stableDominantTokensRef.current,
             secondaryTokens: stableSecondaryTokensRef.current,
@@ -321,7 +418,7 @@ export function ScannerView() {
 
         const nextResults = payload.results ?? [];
         searchCacheRef.current.set(cacheKey, nextResults);
-        applySearchResults(nextResults, bestStableText, requestId);
+        applySearchResults(nextResults, searchText, requestId);
       } catch (error) {
         if (controller.signal.aborted) return;
         if (requestId !== requestIdRef.current) return;
@@ -339,7 +436,7 @@ export function ScannerView() {
       window.clearTimeout(timeoutId);
       controller.abort();
     };
-  }, [applySearchResults, bestStableText, lockedResult, productType]);
+  }, [applySearchResults, bestStableText, lockedResult, productType, stableHeroText]);
 
   async function openCameraFromUserAction() {
     scannerUiLog("openCameraFromUserAction:called", {
@@ -371,11 +468,15 @@ export function ScannerView() {
     setLockedText("");
     setBestStableText("");
     setHeroText("");
+    setStableHeroText("");
+    setHeroPersistenceCount(0);
     setSecondaryText("");
     setDetectedText("");
     setSearchState("idle");
     lastAcceptedTextRef.current = "";
     lastResultsTextRef.current = "";
+    stableHeroTextRef.current = "";
+    heroBufferRef.current = [];
     stableDominantTokensRef.current = [];
     stableSecondaryTokensRef.current = [];
     bestReadingRef.current = null;
@@ -504,14 +605,24 @@ export function ScannerView() {
         ) : null}
 
         {process.env.NODE_ENV === "development" &&
-        (heroText || secondaryText) ? (
+        (heroText || stableHeroText || secondaryText) ? (
           <div className="mt-3 rounded-md border border-zinc-200 bg-white p-3 text-xs text-zinc-600">
             {heroText ? (
               <p>
-                <span className="font-semibold">Texto principal detectado:</span>{" "}
+                <span className="font-semibold">heroText actual:</span>{" "}
                 {heroText}
               </p>
             ) : null}
+            {stableHeroText ? (
+              <p className="mt-1">
+                <span className="font-semibold">stableHeroText:</span>{" "}
+                {stableHeroText}
+              </p>
+            ) : null}
+            <p className="mt-1">
+              <span className="font-semibold">persistencia:</span>{" "}
+              {heroPersistenceCount}
+            </p>
             {secondaryText ? (
               <p className="mt-1">
                 <span className="font-semibold">Texto secundario:</span>{" "}
