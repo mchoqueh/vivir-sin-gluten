@@ -201,38 +201,68 @@ function scoreTokenGroup(tokens: string[], targetTokens: string[], weight: numbe
   return score;
 }
 
-function scoreCandidate(candidate: IndexedCandidate, tokens: string[]) {
-  if (tokens.length === 0) return 0;
+function scoreCandidate(
+  candidate: IndexedCandidate,
+  tokens: string[],
+  dominantTokens: string[],
+  secondaryTokens: string[],
+) {
+  if (tokens.length === 0 && dominantTokens.length === 0) return 0;
 
   const usefulTokens = tokens.filter((token) => !GENERIC_PRODUCT_TOKENS.has(token));
   const scoringTokens = usefulTokens.length > 0 ? usefulTokens : tokens;
+  const usefulDominantTokens = dominantTokens.filter(
+    (token) => !GENERIC_PRODUCT_TOKENS.has(token),
+  );
+  const usefulSecondaryTokens = secondaryTokens.filter(
+    (token) => !GENERIC_PRODUCT_TOKENS.has(token),
+  );
   let score = 0;
 
-  score += scoreTokenGroup(scoringTokens, candidate.companyTokens, 12);
-  score += scoreTokenGroup(scoringTokens, candidate.nameTokens, 10);
-  score += scoreTokenGroup(scoringTokens, candidate.subcategoryTokens, 5);
-  score += scoreTokenGroup(scoringTokens, candidate.categoryTokens, 3);
+  score += scoreTokenGroup(usefulDominantTokens, candidate.companyTokens, 35);
+  score += scoreTokenGroup(usefulDominantTokens, candidate.nameTokens, 30);
+  score += scoreTokenGroup(usefulDominantTokens, candidate.subcategoryTokens, 9);
+  score += scoreTokenGroup(usefulDominantTokens, candidate.categoryTokens, 5);
+  score += scoreTokenGroup(usefulSecondaryTokens, candidate.companyTokens, 18);
+  score += scoreTokenGroup(usefulSecondaryTokens, candidate.nameTokens, 14);
+  score += scoreTokenGroup(usefulSecondaryTokens, candidate.subcategoryTokens, 5);
+  score += scoreTokenGroup(usefulSecondaryTokens, candidate.categoryTokens, 2);
+  score += scoreTokenGroup(scoringTokens, candidate.companyTokens, 8);
+  score += scoreTokenGroup(scoringTokens, candidate.nameTokens, 7);
+  score += scoreTokenGroup(scoringTokens, candidate.subcategoryTokens, 3);
+  score += scoreTokenGroup(scoringTokens, candidate.categoryTokens, 1.5);
   score += scoreTokenGroup(scoringTokens, candidate.typeTokens, 1);
   score += scoreTokenGroup(scoringTokens, candidate.statusTokens, 1);
 
-  const compactQuery = scoringTokens.join("");
+  const compactQuery = [...usefulDominantTokens, ...scoringTokens].join("");
   if (compactQuery.length >= 5) {
     for (const alias of candidate.aliases) {
       const compactAlias = alias.replace(/\s+/g, "");
       const similarity = tokenSimilarity(compactQuery, compactAlias);
-      if (similarity >= 0.86) score += 16;
-      else if (compactAlias.includes(compactQuery)) score += 10;
+      if (similarity >= 0.86) score += usefulDominantTokens.length > 0 ? 28 : 16;
+      else if (compactAlias.includes(compactQuery)) score += 12;
     }
   }
 
-  const coverage = scoringTokens.filter((token) =>
+  const coverageTokens = unique([...usefulDominantTokens, ...scoringTokens]);
+  const coverage = coverageTokens.filter((token) =>
     candidate.allTokens.some((target) => tokenSimilarity(token, target) >= 0.84),
   ).length;
-  score += (coverage / scoringTokens.length) * 18;
+  score += (coverage / Math.max(1, coverageTokens.length)) * 18;
 
   const genericMatches = tokens.filter((token) =>
     GENERIC_PRODUCT_TOKENS.has(token),
   ).length;
+  const hasDominantNameOrCompanyMatch = usefulDominantTokens.some(
+    (token) =>
+      bestTokenMatch(token, candidate.nameTokens) >= 0.84 ||
+      bestTokenMatch(token, candidate.companyTokens) >= 0.84,
+  );
+
+  if (!hasDominantNameOrCompanyMatch && usefulDominantTokens.length > 0) {
+    score *= 0.82;
+  }
+
   if (genericMatches > 0 && usefulTokens.length === 0) score *= 0.35;
   else score -= genericMatches * 1.5;
 
@@ -248,6 +278,8 @@ export async function POST(request: Request) {
   const body = (await request.json().catch(() => null)) as {
     text?: unknown;
     type?: unknown;
+    dominantTokens?: unknown;
+    secondaryTokens?: unknown;
   } | null;
   const text = typeof body?.text === "string" ? body.text : "";
   const type = body?.type;
@@ -255,8 +287,20 @@ export async function POST(request: Request) {
     type === "FOOD" || type === "MEDICINE" ? type : "ALL";
   const normalizedQuery = normalizeProductSearchText(text);
   const tokens = tokenizeProductSearchText(text).slice(0, 14);
+  const dominantTokens = Array.isArray(body?.dominantTokens)
+    ? body.dominantTokens
+        .filter((token): token is string => typeof token === "string")
+        .flatMap(tokenizeProductSearchText)
+        .slice(0, 8)
+    : [];
+  const secondaryTokens = Array.isArray(body?.secondaryTokens)
+    ? body.secondaryTokens
+        .filter((token): token is string => typeof token === "string")
+        .flatMap(tokenizeProductSearchText)
+        .slice(0, 12)
+    : [];
 
-  if (!hasUsefulOcrText(text)) {
+  if (!hasUsefulOcrText(text) && dominantTokens.length === 0) {
     return Response.json({
       ok: true,
       query: normalizedQuery,
@@ -273,7 +317,12 @@ export async function POST(request: Request) {
 
   const scored = filteredIndex
     .map((candidate): CandidateWithScore => {
-      const score = scoreCandidate(candidate, tokens);
+      const score = scoreCandidate(
+        candidate,
+        tokens,
+        dominantTokens,
+        secondaryTokens,
+      );
       return {
         id: candidate.id,
         sourceType: candidate.sourceType,
@@ -314,6 +363,8 @@ export async function POST(request: Request) {
     ok: true,
     query: normalizedQuery,
     tokens,
+    dominantTokens,
+    secondaryTokens,
     results,
   });
 }

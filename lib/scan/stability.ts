@@ -9,6 +9,10 @@ export type OcrReading = {
   rawText: string;
   normalizedText: string;
   usefulTokens: string[];
+  heroText: string;
+  secondaryText: string;
+  dominantTokens: string[];
+  secondaryTokens: string[];
   timestamp: number;
   qualityScore: number;
 };
@@ -37,9 +41,17 @@ export function buildOcrReading(
   rawText: string,
   bestPreviousText = "",
   timestamp = Date.now(),
+  visual?: {
+    heroText?: string;
+    secondaryText?: string;
+    dominantTokens?: string[];
+    secondaryTokens?: string[];
+  },
 ): OcrReading {
   const normalizedText = normalizeProductSearchText(rawText);
   const usefulTokens = uniqueUsefulTokens(rawText);
+  const dominantTokens = visual?.dominantTokens ?? [];
+  const secondaryTokens = visual?.secondaryTokens ?? [];
   const allWords = normalizedText.split(/\s+/).filter(Boolean);
   const singleLetterWords = countSingleLetterWords(normalizedText);
   const symbols = countSymbols(rawText);
@@ -54,7 +66,10 @@ export function buildOcrReading(
     0,
     Math.round(
       usefulTokens.length * 10 +
+        dominantTokens.length * 14 +
+        secondaryTokens.length * 4 +
         usefulTokenLengthScore(usefulTokens) +
+        usefulTokenLengthScore(dominantTokens) +
         Math.min(14, allWords.length * 2) -
         singleLetterWords * 8 -
         symbols * 1.5 -
@@ -68,6 +83,10 @@ export function buildOcrReading(
     rawText,
     normalizedText,
     usefulTokens,
+    heroText: visual?.heroText ?? "",
+    secondaryText: visual?.secondaryText ?? "",
+    dominantTokens,
+    secondaryTokens,
     timestamp,
     qualityScore,
   };

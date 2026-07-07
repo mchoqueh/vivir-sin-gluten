@@ -27,6 +27,7 @@ import { ProductTypeFilter, type ScannerProductType } from "./ProductTypeFilter"
 import { ScannerResults, type ScannerResult } from "./ScannerResults";
 import { useCameraScanner } from "../_hooks/useCameraScanner";
 import { useOcrScanner } from "../_hooks/useOcrScanner";
+import type { VisualOcrResult } from "@/lib/scan/visual";
 
 type SearchState = "idle" | "searching" | "done" | "no_results" | "error";
 type ScannerState =
@@ -101,6 +102,8 @@ export function ScannerView() {
   const [paused, setPaused] = useState(false);
   const [detectedText, setDetectedText] = useState("");
   const [bestStableText, setBestStableText] = useState("");
+  const [heroText, setHeroText] = useState("");
+  const [secondaryText, setSecondaryText] = useState("");
   const [results, setResults] = useState<ScannerResult[]>([]);
   const [lockedResult, setLockedResult] = useState<ScannerResult | null>(null);
   const [lockedText, setLockedText] = useState("");
@@ -111,6 +114,8 @@ export function ScannerView() {
   const bestReadingRef = useRef<OcrReading | null>(null);
   const lastAcceptedTextRef = useRef("");
   const lastResultsTextRef = useRef("");
+  const stableDominantTokensRef = useRef<string[]>([]);
+  const stableSecondaryTokensRef = useRef<string[]>([]);
   const requestIdRef = useRef(0);
   const searchCacheRef = useRef(new Map<string, ScannerResult[]>());
   const scanningEnabled = isCameraReady && !paused;
@@ -120,16 +125,29 @@ export function ScannerView() {
     cameraStatus === "error";
 
   const handleDetectedText = useCallback(
-    (text: string) => {
+    (ocrResult: VisualOcrResult) => {
       if (lockedResult) return;
+      const text = ocrResult.prioritizedText || ocrResult.rawText;
       if (normalizeProductSearchText(text).length < 3) return;
 
-      const reading = buildOcrReading(text, bestReadingRef.current?.rawText);
+      const reading = buildOcrReading(
+        text,
+        bestReadingRef.current?.rawText,
+        Date.now(),
+        {
+          heroText: ocrResult.heroText,
+          secondaryText: ocrResult.secondaryText,
+          dominantTokens: ocrResult.dominantTokens,
+          secondaryTokens: ocrResult.secondaryTokens,
+        },
+      );
       const nextBuffer = [...ocrBufferRef.current, reading].slice(
         -OCR_BUFFER_SIZE,
       );
       ocrBufferRef.current = nextBuffer;
       setDetectedText(text);
+      setHeroText(ocrResult.heroText);
+      setSecondaryText(ocrResult.secondaryText);
 
       const similarReadCount = countSimilarReadings(nextBuffer, reading);
       const enoughEvidence =
@@ -152,6 +170,8 @@ export function ScannerView() {
 
       bestReadingRef.current = reading;
       lastAcceptedTextRef.current = reading.rawText;
+      stableDominantTokensRef.current = reading.dominantTokens;
+      stableSecondaryTokensRef.current = reading.secondaryTokens;
       setBestStableText(reading.rawText);
     },
     [lockedResult],
@@ -262,7 +282,9 @@ export function ScannerView() {
     }
 
     const controller = new AbortController();
-    const cacheKey = `${productType}:${normalized}`;
+    const dominantCachePart = stableDominantTokensRef.current.join(",");
+    const secondaryCachePart = stableSecondaryTokensRef.current.join(",");
+    const cacheKey = `${productType}:${normalized}:${dominantCachePart}:${secondaryCachePart}`;
     const requestId = requestIdRef.current + 1;
     requestIdRef.current = requestId;
 
@@ -280,7 +302,12 @@ export function ScannerView() {
         const response = await fetch("/api/scan/search", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: bestStableText, type: productType }),
+          body: JSON.stringify({
+            text: bestStableText,
+            type: productType,
+            dominantTokens: stableDominantTokensRef.current,
+            secondaryTokens: stableSecondaryTokensRef.current,
+          }),
           signal: controller.signal,
         });
 
@@ -343,10 +370,14 @@ export function ScannerView() {
     setLockedResult(null);
     setLockedText("");
     setBestStableText("");
+    setHeroText("");
+    setSecondaryText("");
     setDetectedText("");
     setSearchState("idle");
     lastAcceptedTextRef.current = "";
     lastResultsTextRef.current = "";
+    stableDominantTokensRef.current = [];
+    stableSecondaryTokensRef.current = [];
     bestReadingRef.current = null;
     ocrBufferRef.current = [];
     if (!isCameraReady) void openCameraFromUserAction();
@@ -469,6 +500,24 @@ export function ScannerView() {
         {cameraError || ocrError ? (
           <div className="mt-3 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900">
             {cameraError ?? ocrError}
+          </div>
+        ) : null}
+
+        {process.env.NODE_ENV === "development" &&
+        (heroText || secondaryText) ? (
+          <div className="mt-3 rounded-md border border-zinc-200 bg-white p-3 text-xs text-zinc-600">
+            {heroText ? (
+              <p>
+                <span className="font-semibold">Texto principal detectado:</span>{" "}
+                {heroText}
+              </p>
+            ) : null}
+            {secondaryText ? (
+              <p className="mt-1">
+                <span className="font-semibold">Texto secundario:</span>{" "}
+                {secondaryText}
+              </p>
+            ) : null}
           </div>
         ) : null}
 

@@ -1,7 +1,10 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { compactOcrText } from "@/lib/scan/normalize";
+import {
+  buildVisualOcrResult,
+  type VisualOcrResult,
+} from "@/lib/scan/visual";
 
 type OcrStatus = "idle" | "loading" | "scanning" | "paused" | "error";
 
@@ -9,7 +12,7 @@ type UseOcrScannerOptions = {
   videoRef: React.RefObject<HTMLVideoElement | null>;
   enabled: boolean;
   intervalMs?: number;
-  onText: (text: string) => void;
+  onText: (result: VisualOcrResult) => void;
 };
 
 type TesseractWorker = Awaited<
@@ -132,12 +135,10 @@ export function useOcrScanner({
 
       try {
         const worker = await getWorker();
-        const {
-          data: { text },
-        } = await worker.recognize(frame);
+        const { data } = await worker.recognize(frame);
 
         if (!cancelled) {
-          onText(compactOcrText(text));
+          onText(buildVisualOcrResult(data));
         }
       } catch (ocrError) {
         if (!cancelled) {
