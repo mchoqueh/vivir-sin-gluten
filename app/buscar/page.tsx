@@ -54,10 +54,28 @@ export default async function BuscarPage({
       subcategory: true,
       certificationStatus: true,
       normalized: true,
+      _count: {
+        select: { externalInfos: true },
+      },
     },
     orderBy: [{ sourceType: "asc" }, { name: "asc" }],
     take: 10000,
   });
 
-  return <SearchExperience items={items} initialState={initialState} />;
+  return (
+    <SearchExperience
+      items={items.map((item) => ({
+        id: item.id,
+        sourceType: item.sourceType,
+        name: item.name,
+        company: item.company,
+        category: item.category,
+        subcategory: item.subcategory,
+        certificationStatus: item.certificationStatus,
+        normalized: item.normalized,
+        hasExternalInfo: item._count.externalInfos > 0,
+      }))}
+      initialState={initialState}
+    />
+  );
 }

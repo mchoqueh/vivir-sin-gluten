@@ -28,6 +28,7 @@ export type SearchItem = {
   subcategory: string | null;
   certificationStatus: CertificationStatus;
   normalized: string;
+  hasExternalInfo?: boolean;
 };
 
 export type SearchInitialState = {
@@ -272,6 +273,11 @@ function ResultCard({
           Ver ficha →
         </span>
       </div>
+      {item.hasExternalInfo ? (
+        <p className="mt-2 text-xs font-medium text-sky-700">
+          Ficha disponible
+        </p>
+      ) : null}
 
       <h2 className="mt-2 line-clamp-2 text-base font-semibold leading-5 text-zinc-950">
         {item.name}
