@@ -2,8 +2,8 @@ import { NextResponse } from "next/server";
 import { prisma } from "@/lib/db";
 import {
   externalInfoDebug,
-  externalInfoPublicPayload,
-  getOrCreateExternalInfo,
+  externalInfoGenerationPublicPayload,
+  getOrCreateExternalInfoWithDebug,
 } from "@/lib/external/tavily";
 
 export const dynamic = "force-dynamic";
@@ -52,15 +52,17 @@ export async function POST(
       });
     }
 
-    const externalInfo = await getOrCreateExternalInfo(item);
+    const result = await getOrCreateExternalInfoWithDebug(item);
+    const { externalInfo, debug: generationDebug } =
+      externalInfoGenerationPublicPayload(result);
 
     return NextResponse.json({
       ok: true,
-      externalInfo: externalInfoPublicPayload(externalInfo),
+      externalInfo,
       message: externalInfo
         ? "Informacion adicional disponible."
         : "Informacion adicional aun no disponible.",
-      ...(debug ? { debug: externalInfoDebug(externalInfo) } : {}),
+      ...(debug ? { debug: generationDebug } : {}),
     });
   } catch (error) {
     const message =

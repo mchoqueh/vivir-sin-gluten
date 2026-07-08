@@ -7,7 +7,10 @@ const MIN_CONFIDENCE_TO_SAVE = 0.7;
 const DEFAULT_BACKFILL_LIMIT = 25;
 const MAX_BACKFILL_LIMIT = 100;
 
-const inFlightByItemId = new Map<string, Promise<ExternalProductInfo | null>>();
+const inFlightByItemId = new Map<
+  string,
+  Promise<ExternalInfoGenerationResult>
+>();
 
 export type ProductInfoItem = {
   id: string;
@@ -75,6 +78,7 @@ type ExtractedProductInformation = {
   sources: ExternalInfoSourceLink[];
   sourceUrl: string | null;
   rawPayload: TavilyResponse[];
+  searchText: string;
 };
 
 export type ExternalInfoDebug = {
@@ -84,6 +88,14 @@ export type ExternalInfoDebug = {
   fetchedAt?: string;
   rawPayload?: Prisma.JsonValue | null;
   error?: string;
+  queriesUsed?: number;
+  resultsFound?: number;
+  saved?: boolean;
+};
+
+type ExternalInfoGenerationResult = {
+  info: ExternalProductInfo | null;
+  debug: ExternalInfoDebug;
 };
 
 export function externalInfoPublicPayload(info: ExternalProductInfo | null) {
@@ -107,6 +119,15 @@ export function externalInfoPublicPayload(info: ExternalProductInfo | null) {
     sources: info.sources,
     sourceUrl: info.sourceUrl,
     fetchedAt: info.fetchedAt?.toISOString() ?? null,
+  };
+}
+
+export function externalInfoGenerationPublicPayload(
+  result: ExternalInfoGenerationResult,
+) {
+  return {
+    externalInfo: externalInfoPublicPayload(result.info),
+    debug: result.debug,
   };
 }
 
@@ -278,6 +299,38 @@ export async function searchProductInformation(
   return { responses, missingApiKey: false };
 }
 
+async function searchSingleQuery(query: string): Promise<TavilyResponse> {
+  const apiKey = process.env.TAVILY_API_KEY;
+  if (!apiKey) {
+    throw new Error("TAVILY_API_KEY no configurada.");
+  }
+
+  const response = await fetch(TAVILY_SEARCH_URL, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      query,
+      search_depth: "basic",
+      include_answer: true,
+      include_raw_content: true,
+      include_images: false,
+      max_results: 3,
+      topic: "general",
+    }),
+    cache: "no-store",
+  });
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Tavily respondio ${response.status}: ${text.slice(0, 180)}`);
+  }
+
+  return JSON.parse(text) as TavilyResponse;
+}
+
 export function extractProductInformation(
   item: ProductInfoItem,
   responses: TavilyResponse[],
@@ -351,6 +404,7 @@ export function extractProductInformation(
     sources,
     sourceUrl: sources[0]?.url ?? null,
     rawPayload: responses,
+    searchText: text,
   };
 }
 
@@ -366,6 +420,7 @@ export function calculateConfidence(
       extracted.manufacturer,
       extracted.activeIngredient,
       extracted.components,
+      extracted.searchText,
       extracted.sources.map((source) => source.title).join(" "),
     ]
       .filter(Boolean)
@@ -496,18 +551,23 @@ async function readExistingExternalInfo(itemId: string) {
   return existing ? toExternalProductInfo(existing) : null;
 }
 
-async function generateExternalInfo(
+function emptyGenerationResult(error: string): ExternalInfoGenerationResult {
+  return {
+    info: null,
+    debug: {
+      provider: "TAVILY",
+      error,
+      saved: false,
+    },
+  };
+}
+
+async function saveExtractedExternalInfo(
   item: ProductInfoItem,
-): Promise<ExternalProductInfo | null> {
-  if (!shouldHaveExternalInfo(item)) return null;
-
-  const { responses, missingApiKey } = await searchProductInformation(item);
-  if (missingApiKey || responses.length === 0) return null;
-
-  const extracted = extractProductInformation(item, responses);
-  const { confidence, matchReason } = calculateConfidence(item, extracted);
-  if (confidence < MIN_CONFIDENCE_TO_SAVE) return null;
-
+  extracted: ExtractedProductInformation,
+  confidence: number,
+  matchReason: string,
+) {
   const saved = await prisma.productExternalInfo.upsert({
     where: { itemId: item.id },
     update: {
@@ -558,6 +618,87 @@ async function generateExternalInfo(
   return toExternalProductInfo(saved);
 }
 
+async function generateExternalInfo(
+  item: ProductInfoItem,
+): Promise<ExternalInfoGenerationResult> {
+  if (!shouldHaveExternalInfo(item)) {
+    return emptyGenerationResult("Producto fuera del alcance de informacion adicional.");
+  }
+
+  if (!process.env.TAVILY_API_KEY) {
+    return emptyGenerationResult("TAVILY_API_KEY no configurada.");
+  }
+
+  const responses: TavilyResponse[] = [];
+  let best:
+    | {
+        extracted: ExtractedProductInformation;
+        confidence: number;
+        matchReason: string;
+      }
+    | null = null;
+  let queriesUsed = 0;
+
+  for (const query of buildSearchQueries(item)) {
+    queriesUsed += 1;
+    responses.push(await searchSingleQuery(query));
+
+    const extracted = extractProductInformation(item, responses);
+    const { confidence, matchReason } = calculateConfidence(item, extracted);
+    if (!best || confidence > best.confidence) {
+      best = { extracted, confidence, matchReason };
+    }
+
+    if (confidence >= MIN_CONFIDENCE_TO_SAVE) {
+      const info = await saveExtractedExternalInfo(
+        item,
+        extracted,
+        confidence,
+        matchReason,
+      );
+
+      return {
+        info,
+        debug: {
+          provider: "TAVILY",
+          confidence,
+          matchReason,
+          fetchedAt: info.fetchedAt?.toISOString(),
+          rawPayload: info.rawPayload,
+          queriesUsed,
+          resultsFound: responses.reduce(
+            (total, response) => total + (response.results?.length ?? 0),
+            0,
+          ),
+          saved: true,
+        },
+      };
+    }
+  }
+
+  const resultsFound = responses.reduce(
+    (total, response) => total + (response.results?.length ?? 0),
+    0,
+  );
+
+  return {
+    info: null,
+    debug: {
+      provider: "TAVILY",
+      confidence: best?.confidence,
+      matchReason:
+        best?.matchReason ??
+        "Tavily no entrego resultados suficientes para este producto.",
+      rawPayload: toPrismaJson(responses) as Prisma.JsonValue,
+      error:
+        "No se guardo ficha porque la confianza quedo bajo 0.70. No se inventan datos.",
+      queriesUsed,
+      resultsFound,
+      saved: false,
+    },
+  };
+}
+
 export async function getOrCreateExternalInfo(
   item: ProductInfoItem,
 ): Promise<ExternalProductInfo | null> {
@@ -565,6 +706,40 @@ export async function getOrCreateExternalInfo(
 
   const existing = await readExistingExternalInfo(item.id);
   if (existing) return existing;
+
+  const current = inFlightByItemId.get(item.id);
+  if (current) return (await current).info;
+
+  const promise = generateExternalInfo(item).finally(() => {
+    inFlightByItemId.delete(item.id);
+  });
+  inFlightByItemId.set(item.id, promise);
+
+  return (await promise).info;
+}
+
+export async function getOrCreateExternalInfoWithDebug(
+  item: ProductInfoItem,
+): Promise<ExternalInfoGenerationResult> {
+  if (!shouldHaveExternalInfo(item)) {
+    return emptyGenerationResult("Producto fuera del alcance de informacion adicional.");
+  }
+
+  const existing = await readExistingExternalInfo(item.id);
+  if (existing) {
+    return {
+      info: existing,
+      debug: {
+        provider: "TAVILY",
+        confidence: existing.confidence ?? undefined,
+        matchReason: existing.matchReason ?? undefined,
+        fetchedAt: existing.fetchedAt?.toISOString(),
+        rawPayload: existing.rawPayload ?? undefined,
+        saved: true,
+        queriesUsed: 0,
+      },
+    };
+  }
 
   const current = inFlightByItemId.get(item.id);
   if (current) return current;
@@ -592,14 +767,14 @@ export async function refreshExternalInfo(
   }
 
   const current = inFlightByItemId.get(item.id);
-  if (current) return current;
+  if (current) return (await current).info;
 
   const promise = generateExternalInfo(item).finally(() => {
     inFlightByItemId.delete(item.id);
   });
   inFlightByItemId.set(item.id, promise);
 
-  return promise;
+  return (await promise).info;
 }
 
 export async function getExistingExternalInfo(item: ProductInfoItem) {
