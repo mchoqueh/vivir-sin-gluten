@@ -1,0 +1,5 @@
+ALTER TYPE "ProductExternalInfoSource" ADD VALUE IF NOT EXISTS 'TAVILY';
+
+ALTER TABLE "ProductExternalInfo"
+ADD COLUMN IF NOT EXISTS "summary" TEXT,
+ADD COLUMN IF NOT EXISTS "sources" JSONB;

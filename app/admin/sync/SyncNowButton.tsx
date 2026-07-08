@@ -233,11 +233,18 @@ function OfficialResultSummary({ result }: { result: SyncResponse }) {
 }
 
 function ExternalResultSummary({ result }: { result: SyncResponse }) {
-  if (result.type !== "EXTERNAL_PRODUCT_INFO") return null;
+  if (
+    result.type !== "EXTERNAL_INFO_BACKFILL" &&
+    result.type !== "EXTERNAL_PRODUCT_INFO"
+  ) {
+    return null;
+  }
 
   return (
     <div className="mt-6 rounded-md border border-zinc-200 bg-white p-4">
-      <h3 className="font-semibold text-zinc-950">Resumen de fichas sanitarias</h3>
+      <h3 className="font-semibold text-zinc-950">
+        Resumen de informacion adicional
+      </h3>
       <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
         <div>
           <dt className="text-zinc-500">Procesados</dt>
@@ -293,10 +300,10 @@ function SyncResult({ result }: { result: unknown }) {
 
 function progressLabel(action: SyncAction, elapsedSeconds: number) {
   if (action === "external") {
-    if (elapsedSeconds < 8) return "Preparando productos a enriquecer...";
-    if (elapsedSeconds < 35) return "Consultando fuente sanitaria externa...";
+    if (elapsedSeconds < 8) return "Buscando fichas antiguas o faltantes...";
+    if (elapsedSeconds < 35) return "Consultando Tavily para informacion adicional...";
     if (elapsedSeconds < 120) return "Guardando fichas encontradas...";
-    return "La sincronizacion sigue en curso.";
+    return "La actualizacion sigue en curso.";
   }
 
   if (elapsedSeconds < 8) return "Conectando con el servidor...";
@@ -339,7 +346,7 @@ export function SyncNowButton() {
     const endpoint =
       action === "official"
         ? "/api/admin/sync-official-pdfs"
-        : "/api/admin/sync-external-product-info";
+        : "/api/admin/external-info/backfill";
 
     setLoading((current) => ({ ...current, [action]: true }));
     setElapsedSeconds((current) => ({ ...current, [action]: 0 }));
@@ -351,7 +358,7 @@ export function SyncNowButton() {
         headers: { "Content-Type": "application/json" },
         body:
           action === "external"
-            ? JSON.stringify({ onlyMissing: true, limit: 50 })
+            ? JSON.stringify({ limit: 25, olderThanDays: 30 })
             : undefined,
       });
       const data = await readSyncResponse(response);
@@ -397,10 +404,10 @@ export function SyncNowButton() {
       </section>
 
       <section className="rounded-md border border-zinc-200 bg-white p-5">
-        <h2 className="text-lg font-semibold">Fichas sanitarias</h2>
+        <h2 className="text-lg font-semibold">Informacion adicional</h2>
         <p className="mt-2 text-sm leading-6 text-zinc-600">
-          Busca informacion adicional de medicamentos y suplementos en fuentes
-          sanitarias externas. No modifica el estado sin gluten.
+          Las fichas adicionales se generan automaticamente la primera vez que
+          un producto es consultado. Quedan almacenadas para futuras consultas.
         </p>
         <button
           type="button"
@@ -408,7 +415,7 @@ export function SyncNowButton() {
           disabled={loading.external}
           className="mt-5 rounded-md bg-sky-700 px-5 py-3 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
         >
-          {loading.external ? "Sincronizando..." : "Sincronizar fichas"}
+          {loading.external ? "Actualizando..." : "Actualizar fichas antiguas"}
         </button>
         {loading.external ? (
           <ProgressBox

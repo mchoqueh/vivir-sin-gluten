@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { backfillExternalInfo } from "@/lib/external/tavily";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
@@ -11,24 +12,26 @@ function asBoolean(value: unknown, fallback = false) {
   return fallback;
 }
 
-function asLimit(value: unknown) {
+function asNumber(value: unknown) {
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return undefined;
 
-  return Math.max(1, Math.min(Math.floor(parsed), 500));
+  return Math.floor(parsed);
 }
 
 export async function POST(request: Request) {
+  // TODO: proteger con autenticacion de administrador cuando exista login.
   try {
     const body = (await request.json().catch(() => ({}))) as {
+      olderThanDays?: unknown;
       limit?: unknown;
       force?: unknown;
-      onlyMissing?: unknown;
       debug?: unknown;
     };
-    const { backfillExternalInfo } = await import("@/lib/external/tavily");
+
     const result = await backfillExternalInfo({
-      limit: asLimit(body.limit),
+      olderThanDays: asNumber(body.olderThanDays),
+      limit: asNumber(body.limit),
       force: asBoolean(body.force),
       debug: asBoolean(body.debug),
     });
@@ -38,24 +41,19 @@ export async function POST(request: Request) {
     const message =
       error instanceof Error
         ? error.message
-        : "Error desconocido al sincronizar fichas sanitarias";
-    const details = {
-      step: "SYNC_EXTERNAL_PRODUCT_INFO_ROUTE",
-      url: "/api/admin/sync-external-product-info",
-    };
+        : "Error desconocido al actualizar fichas antiguas.";
 
-    console.error("[external-info] sync failed", {
-      ...details,
+    console.error("[tavily] backfill route failed", {
+      step: "EXTERNAL_INFO_BACKFILL_ROUTE",
       error: message,
     });
 
     return NextResponse.json(
       {
         ok: false,
-        type: "EXTERNAL_PRODUCT_INFO",
+        type: "EXTERNAL_INFO_BACKFILL",
         status: "FAILED",
         error: message,
-        details,
       },
       { status: 500 },
     );

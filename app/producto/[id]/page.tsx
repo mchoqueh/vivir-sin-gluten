@@ -9,9 +9,13 @@ import {
   sourceTypeLabel,
 } from "@/lib/utils";
 import {
-  getExternalInfoForItem,
+  ExternalInfoSection,
+  type ExternalInfoViewModel,
+} from "./ExternalInfoSection";
+import {
+  getExistingExternalInfo,
   type ExternalProductInfo,
-} from "@/lib/external/product-info";
+} from "@/lib/external/tavily";
 
 export const dynamic = "force-dynamic";
 
@@ -124,6 +128,32 @@ function productTypeLabel(
   return sourceTypeLabel(item.sourceType);
 }
 
+function serializeExternalInfo(
+  externalInfo: ExternalProductInfo | null,
+): ExternalInfoViewModel | null {
+  if (!externalInfo) return null;
+
+  return {
+    id: externalInfo.id,
+    source: externalInfo.source,
+    externalName: externalInfo.externalName,
+    productType: externalInfo.productType,
+    activeIngredient: externalInfo.activeIngredient,
+    components: externalInfo.components,
+    holder: externalInfo.holder,
+    manufacturer: externalInfo.manufacturer,
+    pharmaceuticalForm: externalInfo.pharmaceuticalForm,
+    concentration: externalInfo.concentration,
+    saleCondition: externalInfo.saleCondition,
+    sanitaryRegistry: externalInfo.sanitaryRegistry,
+    registryStatus: externalInfo.registryStatus,
+    summary: externalInfo.summary,
+    sources: externalInfo.sources,
+    sourceUrl: externalInfo.sourceUrl,
+    fetchedAt: externalInfo.fetchedAt?.toISOString() ?? null,
+  };
+}
+
 function statusMeta(status: ProductDetail["certificationStatus"]) {
   if (status === "CERTIFIED_GLUTEN_FREE") {
     return {
@@ -170,64 +200,6 @@ function FieldRow({ label, value }: { label: string; value?: string | null }) {
         {value}
       </dd>
     </div>
-  );
-}
-
-function ExternalProductInfoCard({
-  externalInfo,
-}: {
-  externalInfo: ExternalProductInfo;
-}) {
-  const rows = [
-    ["Principio activo", externalInfo.activeIngredient],
-    ["Componentes", externalInfo.components],
-    ["Forma farmaceutica", externalInfo.pharmaceuticalForm],
-    ["Concentracion", externalInfo.concentration],
-    ["Registro sanitario", externalInfo.sanitaryRegistry],
-    ["Condicion de venta", externalInfo.saleCondition],
-    ["Titular", externalInfo.holder],
-    ["Fabricante", externalInfo.manufacturer],
-    ["Fecha de consulta", externalInfo.fetchedAt ? formatDate(externalInfo.fetchedAt) : null],
-  ] as const;
-
-  return (
-    <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        <h2 className="mr-auto text-lg font-semibold text-zinc-950">
-          Informacion adicional
-        </h2>
-        <span className="rounded bg-sky-50 px-2 py-1 text-xs font-medium text-sky-800">
-          {externalInfo.source === "ISP" ? "ISP/ANAMED" : externalInfo.source}
-        </span>
-        {externalInfo.productType ? (
-          <span className="rounded bg-zinc-100 px-2 py-1 text-xs font-medium text-zinc-700">
-            {externalInfo.productType}
-          </span>
-        ) : null}
-      </div>
-
-      <dl className="mt-4">
-        {rows.map(([label, value]) => (
-          <FieldRow key={label} label={label} value={value} />
-        ))}
-      </dl>
-
-      {externalInfo.sourceUrl ? (
-        <a
-          href={externalInfo.sourceUrl}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-4 inline-flex rounded-md border border-zinc-300 px-3 py-2 text-sm font-semibold text-zinc-800 hover:bg-zinc-50"
-        >
-          Ver fuente externa
-        </a>
-      ) : null}
-
-      <p className="mt-4 text-sm leading-6 text-zinc-600">
-        Informacion sanitaria/comercial obtenida desde fuentes externas. No
-        reemplaza la indicacion de un profesional de salud.
-      </p>
-    </section>
   );
 }
 
@@ -339,7 +311,7 @@ export default async function ProductoPage({
 
   if (!item) notFound();
 
-  const externalInfo = await getExternalInfoForItem(item);
+  const externalInfo = await getExistingExternalInfo(item);
   const latestSnapshot = item.snapshots[0];
   const latestSync = latestSnapshot?.sync;
   const status = statusMeta(item.certificationStatus);
@@ -430,9 +402,11 @@ export default async function ProductoPage({
           </dl>
         </section>
 
-        {externalInfo ? (
-          <ExternalProductInfoCard externalInfo={externalInfo} />
-        ) : null}
+        <ExternalInfoSection
+          productId={item.id}
+          initialExternalInfo={serializeExternalInfo(externalInfo)}
+          debug={debug}
+        />
 
         <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold text-zinc-950">

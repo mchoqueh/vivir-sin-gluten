@@ -30,6 +30,7 @@ enum ItemCertificationStatus {
 }
 
 enum ProductExternalInfoSource {
+  TAVILY
   ISP
   PHARMACY
   MANUAL
@@ -77,6 +78,8 @@ model ProductExternalInfo {
   saleCondition      String?
   sanitaryRegistry   String?
   registryStatus     String?
+  summary            String?
+  sources            Json?
   sourceUrl          String?
   confidence         Float?
   matchReason        String?
