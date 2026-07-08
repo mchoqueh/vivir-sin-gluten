@@ -1,9 +1,3 @@
-import {
-  getDocument,
-  GlobalWorkerOptions,
-} from "pdfjs-dist/legacy/build/pdf.mjs";
-import "pdfjs-dist/legacy/build/pdf.worker.mjs";
-
 export type ConvivirCertificationStatus =
   | "CERTIFIED_GLUTEN_FREE"
   | "NOT_RENEWED_ANALYSIS"
@@ -38,7 +32,170 @@ type DetectedPdfLine = {
   raw: string;
 };
 
-GlobalWorkerOptions.workerSrc = "";
+type PdfJsModule = typeof import("pdfjs-dist/legacy/build/pdf.mjs");
+
+type DomMatrixInit = number[] | DOMMatrixReadOnly | string;
+
+class NodeDOMMatrix {
+  a = 1;
+  b = 0;
+  c = 0;
+  d = 1;
+  e = 0;
+  f = 0;
+  m11 = 1;
+  m12 = 0;
+  m13 = 0;
+  m14 = 0;
+  m21 = 0;
+  m22 = 1;
+  m23 = 0;
+  m24 = 0;
+  m31 = 0;
+  m32 = 0;
+  m33 = 1;
+  m34 = 0;
+  m41 = 0;
+  m42 = 0;
+  m43 = 0;
+  m44 = 1;
+  is2D = true;
+  isIdentity = true;
+
+  constructor(init?: DomMatrixInit) {
+    if (Array.isArray(init) && init.length >= 6) {
+      this.a = Number(init[0] ?? 1);
+      this.b = Number(init[1] ?? 0);
+      this.c = Number(init[2] ?? 0);
+      this.d = Number(init[3] ?? 1);
+      this.e = Number(init[4] ?? 0);
+      this.f = Number(init[5] ?? 0);
+      this.m11 = this.a;
+      this.m12 = this.b;
+      this.m21 = this.c;
+      this.m22 = this.d;
+      this.m41 = this.e;
+      this.m42 = this.f;
+      this.isIdentity =
+        this.a === 1 &&
+        this.b === 0 &&
+        this.c === 0 &&
+        this.d === 1 &&
+        this.e === 0 &&
+        this.f === 0;
+    }
+  }
+
+  multiply() {
+    return this;
+  }
+
+  multiplySelf() {
+    return this;
+  }
+
+  preMultiplySelf() {
+    return this;
+  }
+
+  translateSelf() {
+    return this;
+  }
+
+  scaleSelf() {
+    return this;
+  }
+
+  rotateSelf() {
+    return this;
+  }
+
+  invertSelf() {
+    return this;
+  }
+
+  transformPoint(point: DOMPointInit = {}) {
+    const x = Number(point.x ?? 0);
+    const y = Number(point.y ?? 0);
+
+    return {
+      x: x * this.a + y * this.c + this.e,
+      y: x * this.b + y * this.d + this.f,
+      z: Number(point.z ?? 0),
+      w: Number(point.w ?? 1),
+    };
+  }
+
+  toFloat32Array() {
+    return Float32Array.from(this.toFloat64Array());
+  }
+
+  toFloat64Array() {
+    return Float64Array.from([
+      this.m11,
+      this.m12,
+      this.m13,
+      this.m14,
+      this.m21,
+      this.m22,
+      this.m23,
+      this.m24,
+      this.m31,
+      this.m32,
+      this.m33,
+      this.m34,
+      this.m41,
+      this.m42,
+      this.m43,
+      this.m44,
+    ]);
+  }
+}
+
+class NodeImageData {
+  data: Uint8ClampedArray;
+  width: number;
+  height: number;
+
+  constructor(dataOrWidth: Uint8ClampedArray | number, width: number, height?: number) {
+    if (typeof dataOrWidth === "number") {
+      this.width = dataOrWidth;
+      this.height = width;
+      this.data = new Uint8ClampedArray(this.width * this.height * 4);
+    } else {
+      this.data = dataOrWidth;
+      this.width = width;
+      this.height = height ?? 0;
+    }
+  }
+}
+
+class NodePath2D {}
+
+let pdfJsPromise: Promise<PdfJsModule> | null = null;
+
+function installPdfJsNodePolyfills() {
+  const globalScope = globalThis as typeof globalThis & {
+    DOMMatrix?: typeof DOMMatrix;
+    ImageData?: typeof ImageData;
+    Path2D?: typeof Path2D;
+  };
+
+  globalScope.DOMMatrix ??= NodeDOMMatrix as unknown as typeof DOMMatrix;
+  globalScope.ImageData ??= NodeImageData as unknown as typeof ImageData;
+  globalScope.Path2D ??= NodePath2D as unknown as typeof Path2D;
+}
+
+async function getPdfJs() {
+  installPdfJsNodePolyfills();
+
+  pdfJsPromise ??= import("pdfjs-dist/legacy/build/pdf.mjs").then((pdfjs) => {
+    pdfjs.GlobalWorkerOptions.workerSrc = "";
+    return pdfjs;
+  });
+
+  return pdfJsPromise;
+}
 
 const Y_TOLERANCE = 3;
 
@@ -355,11 +512,13 @@ function detectedLinesToRows(lines: DetectedPdfLine[]) {
 }
 
 async function getDetectedPdfLines(buffer: Buffer) {
+  const { getDocument } = await getPdfJs();
   const loadingTask = getDocument({
     data: new Uint8Array(buffer),
+    disableWorker: true,
     useSystemFonts: true,
     useWorkerFetch: false,
-  });
+  } as unknown as Parameters<typeof getDocument>[0]);
   const pdf = await loadingTask.promise;
   const lines: DetectedPdfLine[] = [];
 
