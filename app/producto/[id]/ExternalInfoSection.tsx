@@ -24,16 +24,53 @@ export type ExternalInfoViewModel = {
   summary: string | null;
   sources: ExternalInfoSourceLink[];
   sourceUrl: string | null;
+  dataConfidence?: number | null;
+  confidence?: number | null;
   fetchedAt: string | null;
+};
+
+type ConfidenceCriterion = {
+  key: string;
+  label: string;
+  score: number;
+  weight: number;
+  weighted: number;
+  status: "OK" | "PARTIAL" | "FAIL";
+  reason: string;
+};
+
+type ConfidenceBreakdown = {
+  final: number;
+  threshold: number;
+  decision: "SAVED" | "NOT_SAVED";
+  criteria: ConfidenceCriterion[];
+  tavily: {
+    bestScore: number | null;
+    averageAcceptedScore: number | null;
+    acceptedResults: number;
+    discardedResults: number;
+  };
 };
 
 type DebugInfo = {
   provider?: string;
   confidence?: number;
+  dataConfidence?: number;
+  tavilyScore?: number | null;
+  confidenceBreakdown?: ConfidenceBreakdown;
   matchReason?: string;
   fetchedAt?: string;
   rawPayload?: unknown;
   error?: string;
+  queriesUsed?: number;
+  queriesSent?: string[];
+  resultsFound?: number;
+  usedDomains?: string[];
+  allowedDomains?: string[];
+  discardedDomains?: string[];
+  sourcesUsed?: ExternalInfoSourceLink[];
+  durationMs?: number;
+  saved?: boolean;
 };
 
 type GenerateResponse = {
@@ -72,7 +109,7 @@ function ExternalInfoSkeleton() {
         Informacion adicional
       </h2>
       <p className="mt-2 text-sm text-zinc-600">
-        Buscando informacion adicional...
+        Estamos generando informacion adicional para este producto.
       </p>
       <div className="mt-5 space-y-3">
         <div className="h-4 w-3/4 animate-pulse rounded bg-zinc-100" />
@@ -89,10 +126,11 @@ function ExternalInfoCard({
   externalInfo: ExternalInfoViewModel;
 }) {
   const rows = [
+    ["Tipo de producto", externalInfo.productType],
     ["Principio activo", externalInfo.activeIngredient],
     ["Componentes", externalInfo.components],
-    ["Forma farmaceutica", externalInfo.pharmaceuticalForm],
-    ["Concentracion", externalInfo.concentration],
+    ["Formato", externalInfo.pharmaceuticalForm],
+    ["Presentacion", externalInfo.concentration],
     ["Laboratorio", externalInfo.manufacturer ?? externalInfo.holder],
     ["Condicion de venta", externalInfo.saleCondition],
     ["Registro sanitario", externalInfo.sanitaryRegistry],
@@ -158,9 +196,89 @@ function ExternalInfoCard({
       ) : null}
 
       <p className="mt-4 text-sm leading-6 text-zinc-600">
+        Esta informacion fue generada automaticamente a partir de fuentes
+        publicas consultadas en Chile.
+      </p>
+      <p className="mt-2 text-sm leading-6 text-zinc-600">
         Esta informacion es referencial y no reemplaza la indicacion de un
         profesional de salud.
       </p>
+    </section>
+  );
+}
+
+function ConfidenceBreakdownCard({ debugInfo }: { debugInfo: DebugInfo }) {
+  const breakdown = debugInfo.confidenceBreakdown;
+  if (!breakdown) return null;
+
+  const decisionLabel =
+    breakdown.decision === "SAVED" ? "Guardada" : "No guardada";
+
+  return (
+    <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
+      <h2 className="text-lg font-semibold text-zinc-950">
+        Desglose de confianza
+      </h2>
+      <div className="mt-4 grid gap-3 text-sm sm:grid-cols-4">
+        <div className="rounded-md bg-zinc-50 p-3">
+          <p className="text-zinc-500">Confianza final</p>
+          <p className="mt-1 font-semibold">{breakdown.final}</p>
+        </div>
+        <div className="rounded-md bg-zinc-50 p-3">
+          <p className="text-zinc-500">Umbral</p>
+          <p className="mt-1 font-semibold">{breakdown.threshold}</p>
+        </div>
+        <div className="rounded-md bg-zinc-50 p-3">
+          <p className="text-zinc-500">Decision</p>
+          <p className="mt-1 font-semibold">{decisionLabel}</p>
+        </div>
+        <div className="rounded-md bg-zinc-50 p-3">
+          <p className="text-zinc-500">Score Tavily principal</p>
+          <p className="mt-1 font-semibold">
+            {breakdown.tavily.bestScore ?? "Sin dato"}
+          </p>
+        </div>
+      </div>
+
+      <div className="mt-5 overflow-x-auto">
+        <table className="min-w-full text-left text-sm">
+          <thead className="border-b border-zinc-200 text-xs uppercase text-zinc-500">
+            <tr>
+              <th className="py-2 pr-4">Criterio</th>
+              <th className="py-2 pr-4">Peso</th>
+              <th className="py-2 pr-4">Score</th>
+              <th className="py-2 pr-4">Aporte</th>
+              <th className="py-2 pr-4">Estado</th>
+              <th className="py-2">Razon</th>
+            </tr>
+          </thead>
+          <tbody>
+            {breakdown.criteria.map((criterion) => (
+              <tr key={criterion.key} className="border-b border-zinc-100">
+                <td className="py-3 pr-4 font-medium text-zinc-950">
+                  {criterion.label}
+                </td>
+                <td className="py-3 pr-4">{criterion.weight}</td>
+                <td className="py-3 pr-4">{criterion.score}</td>
+                <td className="py-3 pr-4">{criterion.weighted}</td>
+                <td className="py-3 pr-4">{criterion.status}</td>
+                <td className="py-3 text-zinc-600">{criterion.reason}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      <p className="mt-4 text-sm text-zinc-600">
+        Resultados aceptados: {breakdown.tavily.acceptedResults}. Resultados
+        descartados: {breakdown.tavily.discardedResults}. Promedio Tavily
+        aceptado: {breakdown.tavily.averageAcceptedScore ?? "Sin dato"}.
+      </p>
+      {debugInfo.discardedDomains && debugInfo.discardedDomains.length > 0 ? (
+        <p className="mt-2 text-sm text-zinc-600">
+          Dominios descartados: {debugInfo.discardedDomains.join(", ")}.
+        </p>
+      ) : null}
     </section>
   );
 }
@@ -199,7 +317,7 @@ export function ExternalInfoSection({
         setDebugInfo(data.debug ?? null);
       } catch (error) {
         if (error instanceof DOMException && error.name === "AbortError") return;
-        setMessage("Informacion adicional aun no disponible.");
+        setMessage("Estamos generando informacion adicional para este producto.");
         setDebugInfo(
           debug
             ? {
@@ -224,6 +342,9 @@ export function ExternalInfoSection({
       <>
         <ExternalInfoCard externalInfo={externalInfo} />
         {debug && debugInfo ? (
+          <ConfidenceBreakdownCard debugInfo={debugInfo} />
+        ) : null}
+        {debug && debugInfo ? (
           <pre className="overflow-auto rounded-md bg-zinc-950 p-4 text-xs text-zinc-50">
             {JSON.stringify(debugInfo, null, 2)}
           </pre>
@@ -240,12 +361,17 @@ export function ExternalInfoSection({
         Informacion adicional
       </h2>
       <p className="mt-2 text-sm leading-6 text-zinc-600">
-        {message ?? "Informacion adicional aun no disponible."}
+        {message ?? "Estamos generando informacion adicional para este producto."}
       </p>
       {debug && debugInfo ? (
-        <pre className="mt-4 overflow-auto rounded-md bg-zinc-950 p-4 text-xs text-zinc-50">
-          {JSON.stringify(debugInfo, null, 2)}
-        </pre>
+        <>
+          <div className="mt-4">
+            <ConfidenceBreakdownCard debugInfo={debugInfo} />
+          </div>
+          <pre className="mt-4 overflow-auto rounded-md bg-zinc-950 p-4 text-xs text-zinc-50">
+            {JSON.stringify(debugInfo, null, 2)}
+          </pre>
+        </>
       ) : null}
     </section>
   );

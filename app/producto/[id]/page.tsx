@@ -150,6 +150,8 @@ function serializeExternalInfo(
     summary: externalInfo.summary,
     sources: externalInfo.sources,
     sourceUrl: externalInfo.sourceUrl,
+    dataConfidence: externalInfo.dataConfidence,
+    confidence: externalInfo.confidence,
     fetchedAt: externalInfo.fetchedAt?.toISOString() ?? null,
   };
 }
@@ -379,6 +381,12 @@ export default async function ProductoPage({
           </dl>
         </section>
 
+        <ExternalInfoSection
+          productId={item.id}
+          initialExternalInfo={serializeExternalInfo(externalInfo)}
+          debug={debug}
+        />
+
         <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold text-zinc-950">Trazabilidad</h2>
           <p className="mt-2 text-sm leading-6 text-zinc-600">
@@ -401,12 +409,6 @@ export default async function ProductoPage({
             ) : null}
           </dl>
         </section>
-
-        <ExternalInfoSection
-          productId={item.id}
-          initialExternalInfo={serializeExternalInfo(externalInfo)}
-          debug={debug}
-        />
 
         <section className="rounded-md border border-zinc-200 bg-white p-5 shadow-sm">
           <h2 className="text-lg font-semibold text-zinc-950">

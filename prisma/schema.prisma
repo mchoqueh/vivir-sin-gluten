@@ -81,6 +81,9 @@ model ProductExternalInfo {
   summary            String?
   sources            Json?
   sourceUrl          String?
+  tavilyScore        Float?
+  dataConfidence     Float?
+  confidenceBreakdown Json?
   confidence         Float?
   matchReason        String?
   rawPayload         Json?
@@ -95,6 +98,27 @@ model ProductExternalInfo {
   @@index([externalName])
   @@index([sanitaryRegistry])
   @@index([fetchedAt])
+}
+
+model ExternalSearchLog {
+  id                  String   @id @default(cuid())
+  itemId              String
+  query               String
+  provider            String
+  tavilyScore         Float?
+  dataConfidence      Float?
+  confidenceBreakdown Json?
+  status              String
+  generated           Boolean  @default(false)
+  error               String?
+  durationMs          Int?
+  resultsCount        Int?
+  createdAt           DateTime @default(now())
+
+  @@index([itemId])
+  @@index([provider])
+  @@index([status])
+  @@index([createdAt])
 }
 
 model ItemSnapshot {

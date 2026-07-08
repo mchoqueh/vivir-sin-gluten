@@ -406,8 +406,9 @@ export function SyncNowButton() {
       <section className="rounded-md border border-zinc-200 bg-white p-5">
         <h2 className="text-lg font-semibold">Informacion adicional</h2>
         <p className="mt-2 text-sm leading-6 text-zinc-600">
-          Las fichas adicionales se generan automaticamente la primera vez que
-          un producto es consultado. Quedan almacenadas para futuras consultas.
+          La informacion adicional se genera automaticamente la primera vez que
+          un producto es consultado. Posteriormente queda almacenada en la base
+          de datos.
         </p>
         <button
           type="button"
