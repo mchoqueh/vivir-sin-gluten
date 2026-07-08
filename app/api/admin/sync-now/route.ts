@@ -1,12 +1,13 @@
 import { NextResponse } from "next/server";
-import { syncAllConvivirSources } from "@/lib/convivir/sync";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 export async function POST() {
   // TODO: proteger esta ruta cuando exista login/admin real.
   try {
+    const { syncAllConvivirSources } = await import("@/lib/convivir/sync");
     const results = await syncAllConvivirSources();
     const failed = results.find((result) => result.status === "FAILED");
 

@@ -1,8 +1,8 @@
 import { NextResponse } from "next/server";
-import { syncAllConvivirSources } from "@/lib/convivir/sync";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
+export const maxDuration = 300;
 
 export async function GET(request: Request) {
   const secret = process.env.CRON_SECRET;
@@ -18,6 +18,7 @@ export async function GET(request: Request) {
   }
 
   try {
+    const { syncAllConvivirSources } = await import("@/lib/convivir/sync");
     const results = await syncAllConvivirSources();
     const failed = results.find((result) => result.status === "FAILED");
 
