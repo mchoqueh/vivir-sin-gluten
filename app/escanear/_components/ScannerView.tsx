@@ -227,6 +227,30 @@ function tokenText(tokens: string[] | undefined) {
   return tokens && tokens.length > 0 ? tokens.join(", ") : "Sin datos";
 }
 
+async function readJsonPayload<T>(response: Response, step: string): Promise<T> {
+  const contentType = response.headers.get("content-type") ?? "";
+  const text = await response.text();
+
+  if (!contentType.toLowerCase().includes("application/json")) {
+    throw new Error(
+      `${step}: respuesta no JSON (${response.status}, ${contentType || "sin content-type"}): ${text
+        .replace(/\s+/g, " ")
+        .trim()
+        .slice(0, 180)}`,
+    );
+  }
+
+  try {
+    return JSON.parse(text) as T;
+  } catch (error) {
+    throw new Error(
+      error instanceof Error
+        ? `${step}: JSON invalido (${error.message})`
+        : `${step}: JSON invalido`,
+    );
+  }
+}
+
 function subscribeToUrlChanges() {
   return () => {};
 }
@@ -1192,7 +1216,10 @@ export function ScannerView() {
           throw new Error("No se pudo buscar coincidencias.");
         }
 
-        const payload = (await response.json()) as ScanSearchPayload;
+        const payload = await readJsonPayload<ScanSearchPayload>(
+          response,
+          "SCAN_SEARCH",
+        );
 
         const nextResults = payload.results ?? [];
         searchCacheRef.current.set(cacheKey, payload);

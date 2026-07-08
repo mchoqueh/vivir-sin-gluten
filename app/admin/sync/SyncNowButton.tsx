@@ -2,6 +2,51 @@
 
 import { useState } from "react";
 
+function previewText(value: string) {
+  return value.replace(/\s+/g, " ").trim().slice(0, 500);
+}
+
+async function readSyncResponse(response: Response) {
+  const url = response.url || "/api/admin/sync-now";
+  const status = response.status;
+  const contentType = response.headers.get("content-type") ?? "";
+  const text = await response.text();
+  const isJson = contentType.toLowerCase().includes("application/json");
+
+  if (!isJson) {
+    return {
+      ok: false,
+      error: "La respuesta del servidor no fue JSON.",
+      details: {
+        step: "SYNC_BUTTON_FETCH",
+        url,
+        status,
+        contentType,
+        bodyPreview: previewText(text),
+      },
+    };
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch (error) {
+    return {
+      ok: false,
+      error:
+        error instanceof Error
+          ? `No se pudo interpretar la respuesta JSON: ${error.message}`
+          : "No se pudo interpretar la respuesta JSON.",
+      details: {
+        step: "SYNC_BUTTON_PARSE_JSON",
+        url,
+        status,
+        contentType,
+        bodyPreview: previewText(text),
+      },
+    };
+  }
+}
+
 export function SyncNowButton() {
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<unknown>(null);
@@ -12,7 +57,7 @@ export function SyncNowButton() {
 
     try {
       const response = await fetch("/api/admin/sync-now", { method: "POST" });
-      const data = await response.json();
+      const data = await readSyncResponse(response);
       setResult(data);
     } catch (error) {
       setResult({

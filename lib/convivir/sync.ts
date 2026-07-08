@@ -1,6 +1,10 @@
 import { prisma } from "@/lib/db";
 import { CONVIVIR_SOURCES, type ConvivirSource } from "./sources";
-import { fetchPdfBuffer } from "./fetch-pdf";
+import {
+  fetchPdfBuffer,
+  SyncFetchError,
+  type SyncFailureDetails,
+} from "./fetch-pdf";
 import { sha256Buffer } from "./hash";
 import { parseConvivirPdf } from "./parse-pdf";
 import { buildContentHash, buildRowHash, normalizeText } from "./normalize";
@@ -14,6 +18,7 @@ type SyncResult = {
   removed?: number;
   modified?: number;
   error?: string;
+  details?: SyncFailureDetails;
 };
 
 function buildItemNormalized(row: {
@@ -235,21 +240,47 @@ export async function syncConvivirSource(
   } catch (error) {
     const message =
       error instanceof Error ? error.message : "Error desconocido al sincronizar";
+    const details =
+      error instanceof SyncFetchError
+        ? error.details
+        : {
+            step: "SYNC_SOURCE",
+            url: source.url,
+          };
 
-    await prisma.sourceSync.create({
-      data: {
-        sourceType: source.type,
-        url: source.url,
-        fileHash: "unknown",
-        status: "FAILED",
-        error: message,
-      },
+    console.error("[sync] failed", {
+      ...details,
+      sourceType: source.type,
+      error: message,
     });
+
+    try {
+      await prisma.sourceSync.create({
+        data: {
+          sourceType: source.type,
+          url: source.url,
+          fileHash: "unknown",
+          status: "FAILED",
+          error: message,
+        },
+      });
+    } catch (recordError) {
+      console.error("[sync] failed", {
+        step: "RECORD_FAILED_SYNC",
+        url: source.url,
+        sourceType: source.type,
+        error:
+          recordError instanceof Error
+            ? recordError.message
+            : "No se pudo registrar la sincronizacion fallida.",
+      });
+    }
 
     return {
       sourceType: source.type,
       status: "FAILED",
       error: message,
+      details,
     };
   }
 }
