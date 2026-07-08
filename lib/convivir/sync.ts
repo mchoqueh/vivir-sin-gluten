@@ -10,6 +10,17 @@ import { parseConvivirPdf } from "./parse-pdf";
 import { buildContentHash, buildRowHash, normalizeText } from "./normalize";
 import { diffConvivirRows } from "./diff";
 
+const SYNC_CHANGE_PREVIEW_LIMIT = 100;
+
+type SyncChangedItem = {
+  id?: string;
+  name: string;
+  company?: string | null;
+  category?: string | null;
+  subcategory?: string | null;
+  certificationStatus?: string | null;
+};
+
 type SyncResult = {
   sourceType: "FOOD" | "MEDICINE";
   status: "SUCCESS" | "FAILED" | "SKIPPED_NO_CHANGE";
@@ -17,6 +28,16 @@ type SyncResult = {
   added?: number;
   removed?: number;
   modified?: number;
+  addedItems?: SyncChangedItem[];
+  removedItems?: SyncChangedItem[];
+  modifiedItems?: Array<{
+    previous: SyncChangedItem;
+    next: SyncChangedItem;
+  }>;
+  changePreviewLimit?: number;
+  addedItemsTruncated?: boolean;
+  removedItemsTruncated?: boolean;
+  modifiedItemsTruncated?: boolean;
   error?: string;
   details?: SyncFailureDetails;
 };
@@ -32,6 +53,10 @@ function buildItemNormalized(row: {
       .filter(Boolean)
       .join(" "),
   );
+}
+
+function takeChangePreview<T>(items: T[]) {
+  return items.slice(0, SYNC_CHANGE_PREVIEW_LIMIT);
 }
 
 export async function syncConvivirSource(
@@ -98,14 +123,67 @@ export async function syncConvivirSource(
       rowHash: item.snapshots[0]?.rowHash ?? "",
       name: item.name,
     }));
+    const previousSummaryByNormalized = new Map(
+      activeItems.map((item) => [
+        item.normalized,
+        {
+          id: item.id,
+          name: item.name,
+          company: item.company,
+          category: item.category,
+          subcategory: item.subcategory,
+          certificationStatus: item.certificationStatus,
+        } satisfies SyncChangedItem,
+      ]),
+    );
 
     const nextItems = dedupedRows.map((row) => ({
       normalized: row.normalized,
       rowHash: row.rowHash,
       name: row.name,
     }));
+    const nextSummaryByNormalized = new Map(
+      dedupedRows.map((row) => [
+        row.normalized,
+        {
+          name: row.name,
+          company: row.company,
+          category: row.category,
+          subcategory: row.subcategory,
+          certificationStatus: row.certificationStatus ?? "UNKNOWN",
+        } satisfies SyncChangedItem,
+      ]),
+    );
 
     const diff = diffConvivirRows(previousItems, nextItems);
+    const addedItems = takeChangePreview(
+      diff.added.map(
+        (item) =>
+          nextSummaryByNormalized.get(item.normalized) ?? {
+            name: item.name,
+          },
+      ),
+    );
+    const removedItems = takeChangePreview(
+      diff.removed.map(
+        (item) =>
+          previousSummaryByNormalized.get(item.normalized) ?? {
+            id: item.id,
+            name: item.name,
+          },
+      ),
+    );
+    const modifiedItems = takeChangePreview(
+      diff.modified.map((item) => ({
+        previous: previousSummaryByNormalized.get(item.previous.normalized) ?? {
+          id: item.previous.id,
+          name: item.previous.name,
+        },
+        next: nextSummaryByNormalized.get(item.next.normalized) ?? {
+          name: item.next.name,
+        },
+      })),
+    );
 
     const result = await prisma.$transaction(
       async (tx) => {
@@ -231,6 +309,13 @@ export async function syncConvivirSource(
           added: diff.added.length,
           removed: diff.removed.length,
           modified: diff.modified.length,
+          addedItems,
+          removedItems,
+          modifiedItems,
+          changePreviewLimit: SYNC_CHANGE_PREVIEW_LIMIT,
+          addedItemsTruncated: diff.added.length > addedItems.length,
+          removedItemsTruncated: diff.removed.length > removedItems.length,
+          modifiedItemsTruncated: diff.modified.length > modifiedItems.length,
         };
       },
       { maxWait: 10_000, timeout: 300_000 },

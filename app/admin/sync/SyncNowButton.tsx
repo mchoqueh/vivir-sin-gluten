@@ -3,6 +3,37 @@
 import { useEffect, useMemo, useState } from "react";
 
 const VERCEL_SYNC_TIMEOUT_SECONDS = 300;
+const SOURCE_LABELS = {
+  FOOD: "Alimentos",
+  MEDICINE: "Medicamentos",
+} as const;
+
+type SyncChangedItem = {
+  id?: string;
+  name: string;
+  company?: string | null;
+  category?: string | null;
+  subcategory?: string | null;
+  certificationStatus?: string | null;
+};
+
+type SyncSourceResult = {
+  sourceType: "FOOD" | "MEDICINE";
+  status: string;
+  itemCount?: number;
+  added?: number;
+  removed?: number;
+  modified?: number;
+  addedItems?: SyncChangedItem[];
+  removedItems?: SyncChangedItem[];
+  addedItemsTruncated?: boolean;
+  removedItemsTruncated?: boolean;
+};
+
+type SyncResponse = {
+  ok?: boolean;
+  results?: SyncSourceResult[];
+};
 
 function previewText(value: string) {
   return value.replace(/\s+/g, " ").trim().slice(0, 500);
@@ -47,6 +78,116 @@ async function readSyncResponse(response: Response) {
       },
     };
   }
+}
+
+function isSyncResponse(value: unknown): value is SyncResponse {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    Array.isArray((value as SyncResponse).results)
+  );
+}
+
+function itemLabel(item: SyncChangedItem) {
+  return [item.name, item.company].filter(Boolean).join(" - ");
+}
+
+function ChangeList({
+  title,
+  items,
+  truncated,
+  tone,
+}: {
+  title: string;
+  items: SyncChangedItem[] | undefined;
+  truncated?: boolean;
+  tone: "added" | "removed";
+}) {
+  const color =
+    tone === "added"
+      ? "border-emerald-200 bg-emerald-50 text-emerald-950"
+      : "border-amber-200 bg-amber-50 text-amber-950";
+
+  return (
+    <div className={`rounded-md border p-3 ${color}`}>
+      <h4 className="text-sm font-semibold">{title}</h4>
+      {items && items.length > 0 ? (
+        <ul className="mt-2 space-y-1 text-sm">
+          {items.map((item) => (
+            <li key={`${item.id ?? item.name}-${item.company ?? ""}`}>
+              <span className="font-medium">{itemLabel(item)}</span>
+              {item.category || item.subcategory ? (
+                <span className="text-xs opacity-80">
+                  {" "}
+                  ({[item.category, item.subcategory].filter(Boolean).join(" / ")})
+                </span>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className="mt-2 text-sm opacity-80">Sin cambios.</p>
+      )}
+      {truncated ? (
+        <p className="mt-2 text-xs opacity-80">
+          Lista resumida. Revisa el JSON para el conteo completo.
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+function SyncResultSummary({ result }: { result: unknown }) {
+  if (!isSyncResponse(result)) return null;
+
+  return (
+    <div className="mt-6 space-y-4">
+      {result.results?.map((sourceResult) => (
+        <section
+          key={sourceResult.sourceType}
+          className="rounded-md border border-zinc-200 bg-white p-4"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-semibold text-zinc-950">
+                {SOURCE_LABELS[sourceResult.sourceType]}
+              </h3>
+              <p className="text-sm text-zinc-600">
+                Estado: {sourceResult.status} · Items:{" "}
+                {sourceResult.itemCount ?? "-"}
+              </p>
+            </div>
+            <div className="flex gap-2 text-xs font-semibold">
+              <span className="rounded bg-emerald-100 px-2 py-1 text-emerald-800">
+                +{sourceResult.added ?? 0}
+              </span>
+              <span className="rounded bg-amber-100 px-2 py-1 text-amber-900">
+                -{sourceResult.removed ?? 0}
+              </span>
+              <span className="rounded bg-zinc-100 px-2 py-1 text-zinc-700">
+                mod {sourceResult.modified ?? 0}
+              </span>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <ChangeList
+              title="Incorporados"
+              items={sourceResult.addedItems}
+              truncated={sourceResult.addedItemsTruncated}
+              tone="added"
+            />
+            <ChangeList
+              title="Removidos"
+              items={sourceResult.removedItems}
+              truncated={sourceResult.removedItemsTruncated}
+              tone="removed"
+            />
+          </div>
+        </section>
+      ))}
+    </div>
+  );
 }
 
 export function SyncNowButton() {
@@ -143,9 +284,12 @@ export function SyncNowButton() {
       ) : null}
 
       {result ? (
-        <pre className="mt-8 overflow-auto rounded-md bg-zinc-950 p-4 text-sm text-zinc-50">
-          {JSON.stringify(result, null, 2)}
-        </pre>
+        <>
+          <SyncResultSummary result={result} />
+          <pre className="mt-8 overflow-auto rounded-md bg-zinc-950 p-4 text-sm text-zinc-50">
+            {JSON.stringify(result, null, 2)}
+          </pre>
+        </>
       ) : null}
     </div>
   );
