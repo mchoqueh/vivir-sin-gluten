@@ -189,10 +189,13 @@ function installPdfJsNodePolyfills() {
 async function getPdfJs() {
   installPdfJsNodePolyfills();
 
-  pdfJsPromise ??= import("pdfjs-dist/legacy/build/pdf.mjs").then((pdfjs) => {
-    pdfjs.GlobalWorkerOptions.workerSrc = "";
-    return pdfjs;
-  });
+  pdfJsPromise ??= import("pdfjs-dist/legacy/build/pdf.worker.mjs").then(
+    async () => {
+      const pdfjs = await import("pdfjs-dist/legacy/build/pdf.mjs");
+
+      return pdfjs;
+    },
+  );
 
   return pdfJsPromise;
 }
