@@ -13,6 +13,7 @@ export type ScannerResult = {
   certificationStatus: string;
   score: number;
   confidence: number;
+  scanLayer?: "PRECISION" | "CATEGORY" | "BRAND" | "GLOBAL";
 };
 
 type ScannerState =

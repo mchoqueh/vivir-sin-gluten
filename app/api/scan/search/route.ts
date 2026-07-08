@@ -5,12 +5,18 @@ import {
   normalizeProductSearchText,
   tokenizeProductSearchText,
 } from "@/lib/scan/normalize";
+import {
+  inferScanContext,
+  type ScanContext,
+  type ScanContextDictionaries,
+} from "@/lib/scan/context";
 import { certificationStatusLabel, sourceTypeLabel } from "@/lib/utils";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type ProductTypeFilter = "ALL" | "FOOD" | "MEDICINE";
+type ScanSearchLayer = "PRECISION" | "CATEGORY" | "BRAND" | "GLOBAL";
 
 type Candidate = {
   id: string;
@@ -38,12 +44,14 @@ type IndexedCandidate = Candidate & {
 type CandidateWithScore = Candidate & {
   score: number;
   confidence: number;
+  scanLayer: ScanSearchLayer;
 };
 
 let cachedIndex:
   | {
       expiresAt: number;
       items: IndexedCandidate[];
+      dictionaries: Required<ScanContextDictionaries>;
     }
   | undefined;
 
@@ -111,7 +119,7 @@ function indexCandidate(candidate: Candidate): IndexedCandidate {
 async function getProductIndex() {
   const now = Date.now();
   if (cachedIndex && cachedIndex.expiresAt > now) {
-    return cachedIndex.items;
+    return cachedIndex;
   }
 
   const candidates: Candidate[] = await prisma.officialItem.findMany({
@@ -131,12 +139,18 @@ async function getProductIndex() {
   });
 
   const items = candidates.map(indexCandidate);
+  const dictionaries = {
+    companyTokens: unique(items.flatMap((item) => item.companyTokens)),
+    categoryTokens: unique(items.flatMap((item) => item.categoryTokens)),
+    subcategoryTokens: unique(items.flatMap((item) => item.subcategoryTokens)),
+  };
   cachedIndex = {
     expiresAt: now + 5 * 60 * 1000,
     items,
+    dictionaries,
   };
 
-  return items;
+  return cachedIndex;
 }
 
 function levenshteinDistance(a: string, b: string) {
@@ -199,6 +213,45 @@ function scoreTokenGroup(tokens: string[], targetTokens: string[], weight: numbe
   }
 
   return score;
+}
+
+function hasTokenMatch(tokens: string[], targetTokens: string[], minSimilarity = 0.84) {
+  return tokens.some((token) => bestTokenMatch(token, targetTokens) >= minSimilarity);
+}
+
+function hasCategoryContextMatch(
+  candidate: IndexedCandidate,
+  context: ScanContext,
+) {
+  const categoryMatch = hasTokenMatch(
+    context.probableCategories,
+    candidate.categoryTokens,
+    0.8,
+  );
+  const subcategoryMatch = hasTokenMatch(
+    context.probableSubcategories,
+    candidate.subcategoryTokens,
+    0.8,
+  );
+
+  return categoryMatch || subcategoryMatch;
+}
+
+function hasBrandContextMatch(candidate: IndexedCandidate, context: ScanContext) {
+  return (
+    hasTokenMatch(context.brandTokens, candidate.companyTokens, 0.82) ||
+    hasTokenMatch(context.brandTokens, candidate.nameTokens, 0.86)
+  );
+}
+
+function hasProductContextMatch(
+  candidate: IndexedCandidate,
+  context: ScanContext,
+) {
+  return (
+    hasTokenMatch(context.productTokens, candidate.nameTokens, 0.82) ||
+    hasTokenMatch(context.productTokens, candidate.phraseTokens, 0.86)
+  );
 }
 
 function scoreCandidate(
@@ -269,6 +322,96 @@ function scoreCandidate(
   return Math.max(0, Math.round(score));
 }
 
+function scoreCandidateWithContext({
+  candidate,
+  tokens,
+  dominantTokens,
+  secondaryTokens,
+  context,
+  layer,
+}: {
+  candidate: IndexedCandidate;
+  tokens: string[];
+  dominantTokens: string[];
+  secondaryTokens: string[];
+  context: ScanContext;
+  layer: ScanSearchLayer;
+}) {
+  let score = scoreCandidate(candidate, tokens, dominantTokens, secondaryTokens);
+  const brandMatch = hasBrandContextMatch(candidate, context);
+  const productMatch = hasProductContextMatch(candidate, context);
+  const categoryMatch = hasCategoryContextMatch(candidate, context);
+  const typeMatch =
+    context.probableType !== null && candidate.sourceType === context.probableType;
+
+  if (brandMatch) {
+    score +=
+      scoreTokenGroup(context.brandTokens, candidate.companyTokens, 30) +
+      scoreTokenGroup(context.brandTokens, candidate.nameTokens, 24);
+  }
+  if (productMatch) score += scoreTokenGroup(context.productTokens, candidate.nameTokens, 18);
+  if (categoryMatch) score += 14;
+  if (typeMatch) score += 10;
+
+  if (layer === "PRECISION") score += 18;
+  if (layer === "CATEGORY") score += 8;
+  if (layer === "BRAND") score += 10;
+
+  const onlyGenericContext =
+    context.brandTokens.length === 0 &&
+    context.productTokens.length === 0 &&
+    context.genericTokens.length > 0;
+  if (onlyGenericContext && !brandMatch && !productMatch) score *= 0.45;
+
+  return Math.max(0, Math.round(score));
+}
+
+function layerCandidates({
+  index,
+  context,
+  layer,
+}: {
+  index: IndexedCandidate[];
+  context: ScanContext;
+  layer: ScanSearchLayer;
+}) {
+  if (layer === "GLOBAL") return index;
+
+  return index.filter((candidate) => {
+    const typeMatches =
+      !context.probableType || candidate.sourceType === context.probableType;
+    const categoryMatches = hasCategoryContextMatch(candidate, context);
+    const brandMatches = hasBrandContextMatch(candidate, context);
+    const productMatches = hasProductContextMatch(candidate, context);
+
+    if (layer === "PRECISION") {
+      const hasContextFilter =
+        context.brandTokens.length > 0 ||
+        context.productTokens.length > 0 ||
+        context.probableCategories.length > 0 ||
+        context.probableSubcategories.length > 0;
+      if (!hasContextFilter) return false;
+      if (!typeMatches) return false;
+      if (context.brandTokens.length > 0 && !brandMatches) return false;
+      if (context.productTokens.length > 0 && !productMatches) return false;
+      if (
+        (context.probableCategories.length > 0 ||
+          context.probableSubcategories.length > 0) &&
+        !categoryMatches
+      ) {
+        return false;
+      }
+      return true;
+    }
+
+    if (layer === "CATEGORY") {
+      return typeMatches && categoryMatches;
+    }
+
+    return brandMatches;
+  });
+}
+
 function confidenceFromScore(score: number) {
   if (score < 12) return 0;
   return Math.min(99, Math.round(35 + score * 1.15));
@@ -310,54 +453,79 @@ export async function POST(request: Request) {
     });
   }
 
-  const index = await getProductIndex();
+  const { items: index, dictionaries } = await getProductIndex();
+  const context = inferScanContext(
+    unique([...tokens, ...dominantTokens, ...secondaryTokens]),
+    text,
+    dictionaries,
+  );
   const filteredIndex = index.filter((candidate) =>
     sourceType === "ALL" ? true : candidate.sourceType === sourceType,
   );
-
-  const scored = filteredIndex
-    .map((candidate): CandidateWithScore => {
-      const score = scoreCandidate(
-        candidate,
-        tokens,
-        dominantTokens,
-        secondaryTokens,
-      );
-      return {
-        id: candidate.id,
-        sourceType: candidate.sourceType,
-        name: candidate.name,
-        company: candidate.company,
-        category: candidate.category,
-        subcategory: candidate.subcategory,
-        certificationStatus: candidate.certificationStatus,
-        normalized: candidate.normalized,
-        score,
-        confidence: confidenceFromScore(score),
-      };
-    })
-    .filter((candidate) => candidate.score >= 10)
-    .sort((a, b) => b.score - a.score);
-
+  const layerOrder: ScanSearchLayer[] = [
+    "PRECISION",
+    "CATEGORY",
+    "BRAND",
+    "GLOBAL",
+  ];
   const deduped = new Map<string, CandidateWithScore>();
-  for (const candidate of scored) {
-    if (!deduped.has(candidate.id)) {
-      deduped.set(candidate.id, candidate);
+
+  for (const layer of layerOrder) {
+    const scored = layerCandidates({
+      index: filteredIndex,
+      context,
+      layer,
+    })
+      .map((candidate): CandidateWithScore => {
+        const score = scoreCandidateWithContext({
+          candidate,
+          tokens,
+          dominantTokens,
+          secondaryTokens,
+          context,
+          layer,
+        });
+        return {
+          id: candidate.id,
+          sourceType: candidate.sourceType,
+          name: candidate.name,
+          company: candidate.company,
+          category: candidate.category,
+          subcategory: candidate.subcategory,
+          certificationStatus: candidate.certificationStatus,
+          normalized: candidate.normalized,
+          score,
+          confidence: confidenceFromScore(score),
+          scanLayer: layer,
+        };
+      })
+      .filter((candidate) => candidate.score >= 10)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 20);
+
+    for (const candidate of scored) {
+      const previous = deduped.get(candidate.id);
+      if (!previous || candidate.score > previous.score) {
+        deduped.set(candidate.id, candidate);
+      }
     }
-    if (deduped.size >= 5) break;
   }
 
-  const results = Array.from(deduped.values()).map((candidate) => ({
-    id: candidate.id,
-    sourceType: candidate.sourceType,
-    name: candidate.name,
-    company: candidate.company,
-    category: candidate.category,
-    subcategory: candidate.subcategory,
-    certificationStatus: candidate.certificationStatus,
-    score: candidate.score,
-    confidence: candidate.confidence,
-  }));
+  const results = Array.from(deduped.values())
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5)
+    .map((candidate) => ({
+      id: candidate.id,
+      sourceType: candidate.sourceType,
+      name: candidate.name,
+      company: candidate.company,
+      category: candidate.category,
+      subcategory: candidate.subcategory,
+      certificationStatus: candidate.certificationStatus,
+      score: candidate.score,
+      confidence: candidate.confidence,
+      scanLayer: candidate.scanLayer,
+    }));
 
   return Response.json({
     ok: true,
@@ -365,6 +533,7 @@ export async function POST(request: Request) {
     tokens,
     dominantTokens,
     secondaryTokens,
+    context,
     results,
   });
 }

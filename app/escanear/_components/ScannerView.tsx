@@ -1,7 +1,14 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import {
   areSearchTextsSimilar,
   hasUsefulOcrText,
@@ -38,6 +45,7 @@ import { ScannerResults, type ScannerResult } from "./ScannerResults";
 import { useCameraScanner } from "../_hooks/useCameraScanner";
 import { useOcrScanner } from "../_hooks/useOcrScanner";
 import type { VisualOcrResult } from "@/lib/scan/visual";
+import type { ScanContext } from "@/lib/scan/context";
 
 type SearchState = "idle" | "searching" | "done" | "no_match" | "error";
 type ScannerState =
@@ -73,6 +81,39 @@ type RankedMergeResult = {
   topEntries: SessionTopResult[];
   topResults: ScannerResult[];
   lockEntry: SessionTopResult | null;
+};
+
+type OcrDebugState = {
+  rawText: string;
+  prioritizedText: string;
+  heroText: string;
+  stableHeroText: string;
+  heroPersistenceCount: number;
+  secondaryText: string;
+  dominantTokens: string[];
+  secondaryTokens: string[];
+};
+
+type ScanSearchPayload = {
+  query?: string;
+  tokens?: string[];
+  dominantTokens?: string[];
+  secondaryTokens?: string[];
+  context?: ScanContext;
+  results?: ScannerResult[];
+  reason?: string;
+};
+
+type SessionTopDebugItem = {
+  productId: string;
+  name: string;
+  company: string | null;
+  scanLayer?: ScannerResult["scanLayer"];
+  bestSearchScore: number;
+  bestGlobalConfidence: number;
+  bestCombinedScore: number;
+  timesSeen: number;
+  sourceText: string;
 };
 
 function manualSearchHref(text: string, productType: ScannerProductType) {
@@ -182,6 +223,173 @@ function rankedResultsFromSession(
     .map((entry) => entry.item);
 }
 
+function tokenText(tokens: string[] | undefined) {
+  return tokens && tokens.length > 0 ? tokens.join(", ") : "Sin datos";
+}
+
+function subscribeToUrlChanges() {
+  return () => {};
+}
+
+function getDebugScanSnapshot() {
+  if (typeof window === "undefined") return false;
+
+  return new URLSearchParams(window.location.search).get("debugScan") === "1";
+}
+
+function ScannerDebugPanel({
+  ocrDebug,
+  searchDebug,
+  confidenceMetrics,
+  sessionTopDebug,
+}: {
+  ocrDebug: OcrDebugState | null;
+  searchDebug: ScanSearchPayload | null;
+  confidenceMetrics: {
+    searchScore: number;
+    heroStability: number;
+    qualityScore: number;
+    candidatePersistence: number;
+    globalConfidence: number;
+  };
+  sessionTopDebug: SessionTopDebugItem[];
+}) {
+  const context = searchDebug?.context;
+
+  return (
+    <details className="mt-3 rounded-md border border-zinc-300 bg-white p-3 text-xs text-zinc-700">
+      <summary className="cursor-pointer font-semibold text-zinc-950">
+        Debug scanner
+      </summary>
+      <div className="mt-3 space-y-3">
+        <section>
+          <h3 className="font-semibold text-zinc-900">OCR</h3>
+          <p>
+            <span className="font-medium">raw:</span>{" "}
+            {ocrDebug?.rawText || "Sin lectura"}
+          </p>
+          <p>
+            <span className="font-medium">prioritized:</span>{" "}
+            {ocrDebug?.prioritizedText || "Sin lectura"}
+          </p>
+          <p>
+            <span className="font-medium">heroText:</span>{" "}
+            {ocrDebug?.heroText || "Sin lectura"}
+          </p>
+          <p>
+            <span className="font-medium">stableHeroText:</span>{" "}
+            {ocrDebug?.stableHeroText || "Sin lectura"}
+          </p>
+          <p>
+            <span className="font-medium">persistencia hero:</span>{" "}
+            {ocrDebug?.heroPersistenceCount ?? 0}
+          </p>
+          <p>
+            <span className="font-medium">secondary:</span>{" "}
+            {ocrDebug?.secondaryText || "Sin lectura"}
+          </p>
+          <p>
+            <span className="font-medium">dominantes:</span>{" "}
+            {tokenText(ocrDebug?.dominantTokens)}
+          </p>
+          <p>
+            <span className="font-medium">secundarios:</span>{" "}
+            {tokenText(ocrDebug?.secondaryTokens)}
+          </p>
+        </section>
+
+        <section className="border-t border-zinc-200 pt-3">
+          <h3 className="font-semibold text-zinc-900">Contexto inferido</h3>
+          <p>
+            <span className="font-medium">probableType:</span>{" "}
+            {context?.probableType ?? "Sin datos"}
+          </p>
+          <p>
+            <span className="font-medium">categorias:</span>{" "}
+            {tokenText(context?.probableCategories)}
+          </p>
+          <p>
+            <span className="font-medium">subcategorias:</span>{" "}
+            {tokenText(context?.probableSubcategories)}
+          </p>
+          <p>
+            <span className="font-medium">brandTokens:</span>{" "}
+            {tokenText(context?.brandTokens)}
+          </p>
+          <p>
+            <span className="font-medium">productTokens:</span>{" "}
+            {tokenText(context?.productTokens)}
+          </p>
+          <p>
+            <span className="font-medium">genericTokens:</span>{" "}
+            {tokenText(context?.genericTokens)}
+          </p>
+          <p>
+            <span className="font-medium">matchedAliases:</span>{" "}
+            {tokenText(context?.matchedAliases)}
+          </p>
+          <p>
+            <span className="font-medium">confidence:</span>{" "}
+            {context?.confidence ?? 0}
+          </p>
+        </section>
+
+        <section className="border-t border-zinc-200 pt-3">
+          <h3 className="font-semibold text-zinc-900">Busqueda</h3>
+          <p>
+            <span className="font-medium">query:</span>{" "}
+            {searchDebug?.query || "Sin busqueda"}
+          </p>
+          <p>
+            <span className="font-medium">tokens:</span>{" "}
+            {tokenText(searchDebug?.tokens)}
+          </p>
+          <p>
+            <span className="font-medium">reason:</span>{" "}
+            {searchDebug?.reason ?? "OK"}
+          </p>
+          <div className="mt-2 space-y-1">
+            {(searchDebug?.results ?? []).map((result) => (
+              <p key={result.id}>
+                {result.name} | capa {result.scanLayer ?? "GLOBAL"} | score{" "}
+                {result.score} | confianza {result.confidence}
+              </p>
+            ))}
+          </div>
+        </section>
+
+        <section className="border-t border-zinc-200 pt-3">
+          <h3 className="font-semibold text-zinc-900">Confianza global</h3>
+          <p>Search Score: {confidenceMetrics.searchScore}</p>
+          <p>Hero Stability: {confidenceMetrics.heroStability}</p>
+          <p>OCR Quality: {confidenceMetrics.qualityScore}</p>
+          <p>Candidate Persistence: {confidenceMetrics.candidatePersistence}</p>
+          <p>Global Confidence: {confidenceMetrics.globalConfidence}</p>
+        </section>
+
+        <section className="border-t border-zinc-200 pt-3">
+          <h3 className="font-semibold text-zinc-900">sessionTopResults</h3>
+          <div className="space-y-1">
+            {sessionTopDebug.length > 0 ? (
+              sessionTopDebug.map((entry) => (
+                <p key={entry.productId}>
+                  {entry.name} | {entry.company ?? "Sin empresa"} | capa{" "}
+                  {entry.scanLayer ?? "GLOBAL"} | search{" "}
+                  {entry.bestSearchScore} | global{" "}
+                  {entry.bestGlobalConfidence} | combined{" "}
+                  {entry.bestCombinedScore} | veces {entry.timesSeen}
+                </p>
+              ))
+            ) : (
+              <p>Sin ranking acumulado.</p>
+            )}
+          </div>
+        </section>
+      </div>
+    </details>
+  );
+}
+
 export function ScannerView() {
   const {
     videoRef,
@@ -195,10 +403,7 @@ export function ScannerView() {
   const [paused, setPaused] = useState(false);
   const [detectedText, setDetectedText] = useState("");
   const [bestStableText, setBestStableText] = useState("");
-  const [heroText, setHeroText] = useState("");
   const [stableHeroText, setStableHeroText] = useState("");
-  const [heroPersistenceCount, setHeroPersistenceCount] = useState(0);
-  const [secondaryText, setSecondaryText] = useState("");
   const [results, setResults] = useState<ScannerResult[]>([]);
   const [lockedResult, setLockedResult] = useState<ScannerResult | null>(null);
   const [lockedText, setLockedText] = useState("");
@@ -206,6 +411,18 @@ export function ScannerView() {
   const [searchError, setSearchError] = useState<string | null>(null);
   const [remainingMs, setRemainingMs] = useState(MAX_SCAN_DURATION_MS);
   const [isExtendingSession, setIsExtendingSession] = useState(false);
+  const debugScan = useSyncExternalStore(
+    subscribeToUrlChanges,
+    getDebugScanSnapshot,
+    () => false,
+  );
+  const [ocrDebug, setOcrDebug] = useState<OcrDebugState | null>(null);
+  const [searchDebug, setSearchDebug] = useState<ScanSearchPayload | null>(
+    null,
+  );
+  const [sessionTopDebug, setSessionTopDebug] = useState<
+    SessionTopDebugItem[]
+  >([]);
   const [confidenceMetrics, setConfidenceMetrics] = useState({
     searchScore: 0,
     heroStability: 0,
@@ -237,7 +454,7 @@ export function ScannerView() {
   const sessionExtendedRef = useRef(false);
   const scanExpiredRef = useRef(false);
   const pendingSearchRef = useRef(false);
-  const searchCacheRef = useRef(new Map<string, ScannerResult[]>());
+  const searchCacheRef = useRef(new Map<string, ScanSearchPayload>());
   const scanningEnabled =
     isCameraReady &&
     !paused &&
@@ -331,6 +548,7 @@ export function ScannerView() {
       if (scanExpiredRef.current || searchState === "no_match") return;
       const heroReading = buildHeroReading(ocrResult.heroText);
       let nextStableHeroText = stableHeroTextRef.current;
+      let nextHeroPersistenceCount = 0;
 
       if (heroReading) {
         const nextHeroBuffer = [...heroBufferRef.current, heroReading].slice(-4);
@@ -340,7 +558,7 @@ export function ScannerView() {
           nextHeroBuffer,
           heroReading.rawText,
         );
-        setHeroPersistenceCount(similarHeroCount);
+        nextHeroPersistenceCount = similarHeroCount;
 
         if (!nextStableHeroText && similarHeroCount >= 2) {
           nextStableHeroText = heroReading.rawText;
@@ -351,7 +569,7 @@ export function ScannerView() {
             nextHeroBuffer,
             nextStableHeroText,
           );
-          setHeroPersistenceCount(stableCount);
+          nextHeroPersistenceCount = stableCount;
 
           const replacementHero = findPersistentDifferentHero(
             nextHeroBuffer,
@@ -361,8 +579,9 @@ export function ScannerView() {
             nextStableHeroText = replacementHero;
             stableHeroTextRef.current = replacementHero;
             setStableHeroText(replacementHero);
-            setHeroPersistenceCount(
-              countSimilarHeroReadings(nextHeroBuffer, replacementHero),
+            nextHeroPersistenceCount = countSimilarHeroReadings(
+              nextHeroBuffer,
+              replacementHero,
             );
           }
         }
@@ -393,9 +612,17 @@ export function ScannerView() {
         -OCR_BUFFER_SIZE,
       );
       ocrBufferRef.current = nextBuffer;
+      setOcrDebug({
+        rawText: ocrResult.rawText,
+        prioritizedText: ocrResult.prioritizedText,
+        heroText: ocrResult.heroText,
+        stableHeroText: nextStableHeroText,
+        heroPersistenceCount: nextHeroPersistenceCount,
+        secondaryText: ocrResult.secondaryText,
+        dominantTokens,
+        secondaryTokens: ocrResult.secondaryTokens,
+      });
       setDetectedText(text);
-      setHeroText(ocrResult.heroText);
-      setSecondaryText(ocrResult.secondaryText);
 
       const similarReadCount = countSimilarReadings(nextBuffer, reading);
       const enoughEvidence =
@@ -635,6 +862,19 @@ export function ScannerView() {
         ) ?? null;
 
       setResults(topResults);
+      setSessionTopDebug(
+        visibleEntries.map((entry) => ({
+          productId: entry.productId,
+          name: entry.item.name,
+          company: entry.item.company,
+          scanLayer: entry.item.scanLayer,
+          bestSearchScore: entry.bestSearchScore,
+          bestGlobalConfidence: entry.bestGlobalConfidence,
+          bestCombinedScore: entry.bestCombinedScore,
+          timesSeen: entry.timesSeen,
+          sourceText: entry.sourceText,
+        })),
+      );
       scannerRankingLog("top results updated", {
         count: topResults.length,
         top: visibleEntries.map((entry) => ({
@@ -796,7 +1036,6 @@ export function ScannerView() {
       userAgent: window.navigator.userAgent,
       href: window.location.href,
     });
-
     if (isIOSWebKit()) {
       scannerUiLog("auto-start skipped for iOS WebKit");
       return;
@@ -922,7 +1161,13 @@ export function ScannerView() {
 
       const cachedResults = searchCacheRef.current.get(cacheKey);
       if (cachedResults) {
-        applySearchResults(cachedResults, searchText, requestId, sessionId);
+        if (debugScan) setSearchDebug(cachedResults);
+        applySearchResults(
+          cachedResults.results ?? [],
+          searchText,
+          requestId,
+          sessionId,
+        );
         return;
       }
 
@@ -947,12 +1192,11 @@ export function ScannerView() {
           throw new Error("No se pudo buscar coincidencias.");
         }
 
-        const payload = (await response.json()) as {
-          results?: ScannerResult[];
-        };
+        const payload = (await response.json()) as ScanSearchPayload;
 
         const nextResults = payload.results ?? [];
-        searchCacheRef.current.set(cacheKey, nextResults);
+        searchCacheRef.current.set(cacheKey, payload);
+        if (debugScan) setSearchDebug(payload);
         applySearchResults(nextResults, searchText, requestId, sessionId);
       } catch (error) {
         pendingSearchRef.current = false;
@@ -1005,6 +1249,7 @@ export function ScannerView() {
     applySearchResults,
     bestStableText,
     finalizeNoMatch,
+    debugScan,
     lockedResult,
     productType,
     searchState,
@@ -1047,11 +1292,11 @@ export function ScannerView() {
     lockedResultRef.current = null;
     setLockedText("");
     setBestStableText("");
-    setHeroText("");
     setStableHeroText("");
-    setHeroPersistenceCount(0);
-    setSecondaryText("");
     setDetectedText("");
+    setOcrDebug(null);
+    setSearchDebug(null);
+    setSessionTopDebug([]);
     setSearchState("idle");
     scannerStateRef.current = restart ? "SCANNING" : "IDLE";
     lastAcceptedTextRef.current = "";
@@ -1243,54 +1488,13 @@ export function ScannerView() {
           </div>
         ) : null}
 
-        {process.env.NODE_ENV === "development" &&
-        (heroText || stableHeroText || secondaryText) ? (
-          <div className="mt-3 rounded-md border border-zinc-200 bg-white p-3 text-xs text-zinc-600">
-            {heroText ? (
-              <p>
-                <span className="font-semibold">heroText actual:</span>{" "}
-                {heroText}
-              </p>
-            ) : null}
-            {stableHeroText ? (
-              <p className="mt-1">
-                <span className="font-semibold">stableHeroText:</span>{" "}
-                {stableHeroText}
-              </p>
-            ) : null}
-            <p className="mt-1">
-              <span className="font-semibold">persistencia:</span>{" "}
-              {heroPersistenceCount}
-            </p>
-            {secondaryText ? (
-              <p className="mt-1">
-                <span className="font-semibold">Texto secundario:</span>{" "}
-                {secondaryText}
-              </p>
-            ) : null}
-            <div className="mt-2 border-t border-zinc-200 pt-2">
-              <p>
-                <span className="font-semibold">Search Score:</span>{" "}
-                {confidenceMetrics.searchScore}
-              </p>
-              <p>
-                <span className="font-semibold">Hero Stability:</span>{" "}
-                {confidenceMetrics.heroStability}
-              </p>
-              <p>
-                <span className="font-semibold">OCR Quality:</span>{" "}
-                {confidenceMetrics.qualityScore}
-              </p>
-              <p>
-                <span className="font-semibold">Candidate Persistence:</span>{" "}
-                {confidenceMetrics.candidatePersistence}
-              </p>
-              <p>
-                <span className="font-semibold">Global Confidence:</span>{" "}
-                {confidenceMetrics.globalConfidence}
-              </p>
-            </div>
-          </div>
+        {debugScan ? (
+          <ScannerDebugPanel
+            ocrDebug={ocrDebug}
+            searchDebug={searchDebug}
+            confidenceMetrics={confidenceMetrics}
+            sessionTopDebug={sessionTopDebug}
+          />
         ) : null}
 
         <div className="mt-4 grid grid-cols-2 gap-2">
