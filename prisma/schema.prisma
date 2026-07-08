@@ -52,7 +52,7 @@ model OfficialItem {
   snapshots ItemSnapshot[]
   favorites Favorite[]
   changes   ItemChange[]
-  externalInfos ProductExternalInfo[]
+  externalInfo ProductExternalInfo?
 
   @@unique([sourceType, normalized])
   @@index([sourceType])
@@ -78,16 +78,16 @@ model ProductExternalInfo {
   sanitaryRegistry   String?
   registryStatus     String?
   sourceUrl          String?
+  confidence         Float?
+  matchReason        String?
   rawPayload         Json?
-  matchScore         Int?
-  matchConfidence    Int?
   fetchedAt          DateTime?
   createdAt          DateTime                  @default(now())
   updatedAt          DateTime                  @updatedAt
 
   item OfficialItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
 
-  @@index([itemId])
+  @@unique([itemId])
   @@index([source])
   @@index([externalName])
   @@index([sanitaryRegistry])

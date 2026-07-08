@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 
 const VERCEL_SYNC_TIMEOUT_SECONDS = 300;
 const SOURCE_LABELS = {
@@ -8,16 +8,17 @@ const SOURCE_LABELS = {
   MEDICINE: "Medicamentos",
 } as const;
 
+type SyncAction = "official" | "external";
+
 type SyncChangedItem = {
   id?: string;
   name: string;
   company?: string | null;
   category?: string | null;
   subcategory?: string | null;
-  certificationStatus?: string | null;
 };
 
-type SyncSourceResult = {
+type OfficialSourceResult = {
   sourceType: "FOOD" | "MEDICINE";
   status: string;
   itemCount?: number;
@@ -32,7 +33,18 @@ type SyncSourceResult = {
 
 type SyncResponse = {
   ok?: boolean;
-  results?: SyncSourceResult[];
+  type?: string;
+  startedAt?: string;
+  finishedAt?: string;
+  status?: string;
+  processed?: number;
+  created?: number;
+  updated?: number;
+  skipped?: number;
+  noMatch?: number;
+  errors?: unknown[];
+  message?: string;
+  results?: OfficialSourceResult[];
 };
 
 function previewText(value: string) {
@@ -40,7 +52,7 @@ function previewText(value: string) {
 }
 
 async function readSyncResponse(response: Response) {
-  const url = response.url || "/api/admin/sync-now";
+  const url = response.url;
   const status = response.status;
   const contentType = response.headers.get("content-type") ?? "";
   const text = await response.text();
@@ -81,11 +93,7 @@ async function readSyncResponse(response: Response) {
 }
 
 function isSyncResponse(value: unknown): value is SyncResponse {
-  return (
-    typeof value === "object" &&
-    value !== null &&
-    Array.isArray((value as SyncResponse).results)
-  );
+  return typeof value === "object" && value !== null;
 }
 
 function itemLabel(item: SyncChangedItem) {
@@ -137,12 +145,46 @@ function ChangeList({
   );
 }
 
-function SyncResultSummary({ result }: { result: unknown }) {
-  if (!isSyncResponse(result)) return null;
+function ProgressBox({
+  elapsedSeconds,
+  label,
+}: {
+  elapsedSeconds: number;
+  label: string;
+}) {
+  const progress = Math.min(
+    95,
+    Math.round((elapsedSeconds / VERCEL_SYNC_TIMEOUT_SECONDS) * 100),
+  );
+
+  return (
+    <div className="mt-5 rounded-md border border-emerald-100 bg-emerald-50 p-4">
+      <div className="flex items-center justify-between gap-3 text-sm">
+        <p className="font-medium text-emerald-950">{label}</p>
+        <p className="shrink-0 tabular-nums text-emerald-800">
+          {elapsedSeconds}s
+        </p>
+      </div>
+      <div className="mt-3 h-3 overflow-hidden rounded-full bg-white">
+        <div
+          className="h-full rounded-full bg-emerald-600 transition-[width] duration-500"
+          style={{ width: `${progress}%` }}
+        />
+      </div>
+      <div className="mt-2 flex items-center justify-between text-xs text-emerald-800">
+        <span>Progreso estimado</span>
+        <span>{progress}%</span>
+      </div>
+    </div>
+  );
+}
+
+function OfficialResultSummary({ result }: { result: SyncResponse }) {
+  if (!Array.isArray(result.results)) return null;
 
   return (
     <div className="mt-6 space-y-4">
-      {result.results?.map((sourceResult) => (
+      {result.results.map((sourceResult) => (
         <section
           key={sourceResult.sourceType}
           className="rounded-md border border-zinc-200 bg-white p-4"
@@ -190,107 +232,192 @@ function SyncResultSummary({ result }: { result: unknown }) {
   );
 }
 
+function ExternalResultSummary({ result }: { result: SyncResponse }) {
+  if (result.type !== "EXTERNAL_PRODUCT_INFO") return null;
+
+  return (
+    <div className="mt-6 rounded-md border border-zinc-200 bg-white p-4">
+      <h3 className="font-semibold text-zinc-950">Resumen de fichas sanitarias</h3>
+      <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2 lg:grid-cols-3">
+        <div>
+          <dt className="text-zinc-500">Procesados</dt>
+          <dd className="font-semibold">{result.processed ?? 0}</dd>
+        </div>
+        <div>
+          <dt className="text-zinc-500">Creados</dt>
+          <dd className="font-semibold">{result.created ?? 0}</dd>
+        </div>
+        <div>
+          <dt className="text-zinc-500">Actualizados</dt>
+          <dd className="font-semibold">{result.updated ?? 0}</dd>
+        </div>
+        <div>
+          <dt className="text-zinc-500">Sin match</dt>
+          <dd className="font-semibold">{result.noMatch ?? 0}</dd>
+        </div>
+        <div>
+          <dt className="text-zinc-500">Omitidos</dt>
+          <dd className="font-semibold">{result.skipped ?? 0}</dd>
+        </div>
+        <div>
+          <dt className="text-zinc-500">Errores</dt>
+          <dd className="font-semibold">{result.errors?.length ?? 0}</dd>
+        </div>
+      </dl>
+      {result.message ? (
+        <p className="mt-4 text-sm text-zinc-600">{result.message}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function SyncResult({ result }: { result: unknown }) {
+  if (!isSyncResponse(result)) {
+    return (
+      <pre className="mt-8 overflow-auto rounded-md bg-zinc-950 p-4 text-sm text-zinc-50">
+        {JSON.stringify(result, null, 2)}
+      </pre>
+    );
+  }
+
+  return (
+    <>
+      <OfficialResultSummary result={result} />
+      <ExternalResultSummary result={result} />
+      <pre className="mt-8 overflow-auto rounded-md bg-zinc-950 p-4 text-sm text-zinc-50">
+        {JSON.stringify(result, null, 2)}
+      </pre>
+    </>
+  );
+}
+
+function progressLabel(action: SyncAction, elapsedSeconds: number) {
+  if (action === "external") {
+    if (elapsedSeconds < 8) return "Preparando productos a enriquecer...";
+    if (elapsedSeconds < 35) return "Consultando fuente sanitaria externa...";
+    if (elapsedSeconds < 120) return "Guardando fichas encontradas...";
+    return "La sincronizacion sigue en curso.";
+  }
+
+  if (elapsedSeconds < 8) return "Conectando con el servidor...";
+  if (elapsedSeconds < 25) return "Descargando listados oficiales...";
+  if (elapsedSeconds < 70) return "Parseando PDFs y normalizando registros...";
+  if (elapsedSeconds < 150) return "Guardando snapshots y detectando cambios...";
+  return "La sincronizacion sigue en curso.";
+}
+
 export function SyncNowButton() {
-  const [loading, setLoading] = useState(false);
-  const [result, setResult] = useState<unknown>(null);
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [loading, setLoading] = useState<Record<SyncAction, boolean>>({
+    official: false,
+    external: false,
+  });
+  const [results, setResults] = useState<Record<SyncAction, unknown | null>>({
+    official: null,
+    external: null,
+  });
+  const [elapsedSeconds, setElapsedSeconds] = useState<Record<SyncAction, number>>({
+    official: 0,
+    external: 0,
+  });
 
   useEffect(() => {
-    if (!loading) return;
-
-    const startedAt = Date.now();
+    if (!loading.official && !loading.external) return;
 
     const intervalId = window.setInterval(() => {
-      setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+      setElapsedSeconds((current) => ({
+        official: loading.official ? current.official + 1 : current.official,
+        external: loading.external ? current.external + 1 : current.external,
+      }));
     }, 1000);
 
     return () => window.clearInterval(intervalId);
   }, [loading]);
 
-  const progress = useMemo(() => {
-    if (!loading) return 0;
+  async function runSync(action: SyncAction) {
+    if (loading[action]) return;
 
-    return Math.min(
-      95,
-      Math.round((elapsedSeconds / VERCEL_SYNC_TIMEOUT_SECONDS) * 100),
-    );
-  }, [elapsedSeconds, loading]);
+    const endpoint =
+      action === "official"
+        ? "/api/admin/sync-official-pdfs"
+        : "/api/admin/sync-external-product-info";
 
-  const progressLabel = useMemo(() => {
-    if (elapsedSeconds < 8) return "Conectando con el servidor...";
-    if (elapsedSeconds < 25) return "Descargando listados oficiales...";
-    if (elapsedSeconds < 70) return "Parseando PDFs y normalizando registros...";
-    if (elapsedSeconds < 150) return "Guardando snapshots y detectando cambios...";
-    if (elapsedSeconds < VERCEL_SYNC_TIMEOUT_SECONDS) {
-      return "La sincronizacion sigue en curso. Vercel puede tardar varios minutos.";
-    }
-
-    return "Tiempo limite estimado alcanzado. Esperando respuesta final de Vercel...";
-  }, [elapsedSeconds]);
-
-  async function runSync() {
-    setLoading(true);
-    setResult(null);
-    setElapsedSeconds(0);
+    setLoading((current) => ({ ...current, [action]: true }));
+    setElapsedSeconds((current) => ({ ...current, [action]: 0 }));
+    setResults((current) => ({ ...current, [action]: null }));
 
     try {
-      const response = await fetch("/api/admin/sync-now", { method: "POST" });
-      const data = await readSyncResponse(response);
-      setResult(data);
-    } catch (error) {
-      setResult({
-        ok: false,
-        error: error instanceof Error ? error.message : "Error desconocido",
+      const response = await fetch(endpoint, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body:
+          action === "external"
+            ? JSON.stringify({ onlyMissing: true, limit: 50 })
+            : undefined,
       });
+      const data = await readSyncResponse(response);
+      setResults((current) => ({ ...current, [action]: data }));
+    } catch (error) {
+      setResults((current) => ({
+        ...current,
+        [action]: {
+          ok: false,
+          error: error instanceof Error ? error.message : "Error desconocido",
+        },
+      }));
     } finally {
-      setLoading(false);
+      setLoading((current) => ({ ...current, [action]: false }));
     }
   }
 
   return (
-    <div>
-      <button
-        onClick={runSync}
-        disabled={loading}
-        className="rounded-md bg-emerald-700 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
-      >
-        {loading ? "Sincronizando..." : "Sincronizar ahora"}
-      </button>
+    <div className="grid gap-5 lg:grid-cols-2">
+      <section className="rounded-md border border-zinc-200 bg-white p-5">
+        <h2 className="text-lg font-semibold">Datos oficiales sin gluten</h2>
+        <p className="mt-2 text-sm leading-6 text-zinc-600">
+          Actualiza alimentos y medicamentos desde los PDFs oficiales cargados
+          como fuente principal.
+        </p>
+        <button
+          type="button"
+          onClick={() => runSync("official")}
+          disabled={loading.official}
+          className="mt-5 rounded-md bg-emerald-700 px-5 py-3 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+        >
+          {loading.official
+            ? "Sincronizando..."
+            : "Sincronizar PDFs oficiales"}
+        </button>
+        {loading.official ? (
+          <ProgressBox
+            elapsedSeconds={elapsedSeconds.official}
+            label={progressLabel("official", elapsedSeconds.official)}
+          />
+        ) : null}
+        {results.official ? <SyncResult result={results.official} /> : null}
+      </section>
 
-      {loading ? (
-        <div className="mt-5 rounded-md border border-emerald-100 bg-emerald-50 p-4">
-          <div className="flex items-center justify-between gap-3 text-sm">
-            <p className="font-medium text-emerald-950">{progressLabel}</p>
-            <p className="shrink-0 tabular-nums text-emerald-800">
-              {elapsedSeconds}s
-            </p>
-          </div>
-          <div className="mt-3 h-3 overflow-hidden rounded-full bg-white">
-            <div
-              className="h-full rounded-full bg-emerald-600 transition-[width] duration-500"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-          <div className="mt-2 flex items-center justify-between text-xs text-emerald-800">
-            <span>Progreso estimado</span>
-            <span>{progress}%</span>
-          </div>
-          <p className="mt-3 text-xs text-emerald-900">
-            Esta barra mide el tiempo de espera del request. La respuesta final
-            confirma si la sincronizacion termino o si Vercel corto la funcion
-            por timeout.
-          </p>
-        </div>
-      ) : null}
-
-      {result ? (
-        <>
-          <SyncResultSummary result={result} />
-          <pre className="mt-8 overflow-auto rounded-md bg-zinc-950 p-4 text-sm text-zinc-50">
-            {JSON.stringify(result, null, 2)}
-          </pre>
-        </>
-      ) : null}
+      <section className="rounded-md border border-zinc-200 bg-white p-5">
+        <h2 className="text-lg font-semibold">Fichas sanitarias</h2>
+        <p className="mt-2 text-sm leading-6 text-zinc-600">
+          Busca informacion adicional de medicamentos y suplementos en fuentes
+          sanitarias externas. No modifica el estado sin gluten.
+        </p>
+        <button
+          type="button"
+          onClick={() => runSync("external")}
+          disabled={loading.external}
+          className="mt-5 rounded-md bg-sky-700 px-5 py-3 text-sm font-semibold text-white hover:bg-sky-800 disabled:cursor-not-allowed disabled:bg-zinc-400"
+        >
+          {loading.external ? "Sincronizando..." : "Sincronizar fichas"}
+        </button>
+        {loading.external ? (
+          <ProgressBox
+            elapsedSeconds={elapsedSeconds.external}
+            label={progressLabel("external", elapsedSeconds.external)}
+          />
+        ) : null}
+        {results.external ? <SyncResult result={results.external} /> : null}
+      </section>
     </div>
   );
 }

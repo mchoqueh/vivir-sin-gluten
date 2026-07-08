@@ -54,8 +54,8 @@ export default async function BuscarPage({
       subcategory: true,
       certificationStatus: true,
       normalized: true,
-      _count: {
-        select: { externalInfos: true },
+      externalInfo: {
+        select: { id: true },
       },
     },
     orderBy: [{ sourceType: "asc" }, { name: "asc" }],
@@ -73,7 +73,7 @@ export default async function BuscarPage({
         subcategory: item.subcategory,
         certificationStatus: item.certificationStatus,
         normalized: item.normalized,
-        hasExternalInfo: item._count.externalInfos > 0,
+        hasExternalInfo: Boolean(item.externalInfo),
       }))}
       initialState={initialState}
     />
